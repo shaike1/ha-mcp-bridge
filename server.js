@@ -1243,6 +1243,9 @@ const httpServer = http.createServer(async (req, res) => {
         // Send SSE connection established event
         res.write('data: {"type":"connection","status":"established"}\n\n');
         
+        // Get session ID for duplicate prevention
+        const sessionId = req.headers['mcp-session-id'] || 'default';
+        
         // STREAMABLE HTTP 2025: Send tools list as proper MCP notification (avoid duplicates)
         const sessionKey = `sse_${sessionId}`;
         if (!global.sseSent) global.sseSent = new Set();
