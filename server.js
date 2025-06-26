@@ -247,6 +247,15 @@ async function getTools() {
         },
         required: []
       }
+    },
+    {
+      name: "test_simple",
+      description: "Simple test tool that returns instantly",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        required: []
+      }
     }
   ];
 }
@@ -407,6 +416,14 @@ async function callTool(name, args, sessionToken = null) {
             };
           }
         }
+        
+      case "test_simple":
+        return {
+          content: [{
+            type: "text",
+            text: "✅ Test tool working! Server is responding correctly. The MCP connection is stable."
+          }]
+        };
         
       default:
         throw new Error(`Unknown tool: ${name}`);
@@ -1244,7 +1261,20 @@ const httpServer = http.createServer(async (req, res) => {
         res.write('data: {"type":"connection","status":"established"}\n\n');
         
         // Get session ID for duplicate prevention
-        const sessionId = req.headers['mcp-session-id'] || 'default';
+        const sessionId = req.headers['mcp-session-id'];
+        if (!sessionId) {
+          console.log('STREAMABLE HTTP 2025: SSE request without session ID - skipping tool broadcast');
+          // Keep connection alive but don't send tools without session ID
+          const keepAlive = setInterval(() => {
+            res.write('data: {"type":"ping"}\n\n');
+          }, 30000);
+          
+          req.on('close', () => {
+            clearInterval(keepAlive);
+            console.log('STREAMABLE HTTP 2025: SSE connection closed (no session)');
+          });
+          return;
+        }
         
         // STREAMABLE HTTP 2025: Send tools list as proper MCP notification (avoid duplicates)
         const sessionKey = `sse_${sessionId}`;
@@ -1265,7 +1295,12 @@ const httpServer = http.createServer(async (req, res) => {
               };
               
               console.log(`STREAMABLE HTTP 2025: Sending tools/list_changed notification over SSE (session: ${sessionId})`);
-              res.write(`data: ${JSON.stringify(toolsNotification)}\n\n`);
+              try {
+                res.write(`data: ${JSON.stringify(toolsNotification)}\n\n`);
+              } catch (err) {
+                console.log('STREAMABLE HTTP 2025: Failed to send tools notification, connection lost');
+                return;
+              }
               
               // Then send tools as a proper response that Claude should pick up
               const toolsMessage = {
@@ -1278,7 +1313,12 @@ const httpServer = http.createServer(async (req, res) => {
               };
               
               console.log(`STREAMABLE HTTP 2025: Auto-sending tools/list over SSE (${tools.length} tools, session: ${sessionId})`);
-              res.write(`data: ${JSON.stringify(toolsMessage)}\n\n`);
+              try {
+                res.write(`data: ${JSON.stringify(toolsMessage)}\n\n`);
+              } catch (err) {
+                console.log('STREAMABLE HTTP 2025: Failed to send tools list, connection lost');
+                return;
+              }
               
             } catch (err) {
               console.error('STREAMABLE HTTP 2025: Error sending tools over SSE:', err);
@@ -1288,10 +1328,15 @@ const httpServer = http.createServer(async (req, res) => {
           console.log(`STREAMABLE HTTP 2025: Skipping duplicate tool broadcast for session ${sessionId}`);
         }
         
-        // Keep connection alive
+        // Keep connection alive with more frequent pings
         const keepAlive = setInterval(() => {
-          res.write('data: {"type":"ping"}\n\n');
-        }, 30000);
+          try {
+            res.write('data: {"type":"ping"}\n\n');
+          } catch (err) {
+            clearInterval(keepAlive);
+            console.log('STREAMABLE HTTP 2025: Keep-alive ping failed, connection already closed');
+          }
+        }, 15000); // Ping every 15 seconds instead of 30
         
         req.on('close', () => {
           clearInterval(keepAlive);
