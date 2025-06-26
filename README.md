@@ -19,8 +19,8 @@ A Model Context Protocol (MCP) server for Home Assistant integration with Claude
 
 1. **Clone and Install**
    ```bash
-   git clone <repository>
-   cd ha-mcp
+   git clone https://github.com/YOUR_USERNAME/home-assistant-mcp-server.git
+   cd home-assistant-mcp-server
    npm install
    ```
 
