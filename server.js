@@ -163,7 +163,7 @@ async function haRequest(endpoint, options = {}, sessionToken = null) {
         ...options.headers
       },
       signal: controller.signal,
-      timeout: 30000,
+      timeout: 15000,
       ...options
     });
     
@@ -177,7 +177,7 @@ async function haRequest(endpoint, options = {}, sessionToken = null) {
   } catch (error) {
     clearTimeout(timeoutId);
     if (error.name === 'AbortError') {
-      throw new Error('HA API request timed out (30s)');
+      throw new Error('HA API request timed out (15s) - try requesting a specific entity or smaller dataset');
     }
     throw error;
   }
@@ -237,6 +237,17 @@ async function getTools() {
         properties: {},
         required: []
       }
+    },
+    {
+      name: "get_climate",
+      description: "Get climate/HVAC entities (air conditioning, heating) with temperature info",
+      inputSchema: {
+        type: "object",
+        properties: {
+          entity_id: { type: "string", description: "Specific climate entity ID (optional)" }
+        },
+        required: []
+      }
     }
   ];
 }
@@ -257,6 +268,47 @@ async function callTool(name, args, sessionToken = null) {
         let filteredEntities = entities;
         if (args?.domain) {
           filteredEntities = entities.filter(e => e.entity_id.startsWith(args.domain + '.'));
+          
+          // Simplify response for large datasets to avoid timeouts
+          if (filteredEntities.length > 20) {
+            const simplified = filteredEntities.map(e => ({
+              entity_id: e.entity_id,
+              state: e.state,
+              friendly_name: e.attributes.friendly_name || e.entity_id
+            }));
+            return {
+              content: [{
+                type: "text",
+                text: `Found ${filteredEntities.length} entities in domain '${args.domain}' (simplified view):\n\n${JSON.stringify(simplified, null, 2)}`
+              }]
+            };
+          }
+        } else {
+          // When getting ALL entities, always simplify to prevent timeouts
+          const simplified = entities.map(e => ({
+            entity_id: e.entity_id,
+            state: e.state,
+            friendly_name: e.attributes.friendly_name || e.entity_id,
+            domain: e.entity_id.split('.')[0]
+          }));
+          
+          // Group by domain for easier reading
+          const byDomain = simplified.reduce((acc, entity) => {
+            if (!acc[entity.domain]) acc[entity.domain] = [];
+            acc[entity.domain].push({
+              entity_id: entity.entity_id,
+              state: entity.state,
+              friendly_name: entity.friendly_name
+            });
+            return acc;
+          }, {});
+          
+          return {
+            content: [{
+              type: "text",
+              text: `Found ${entities.length} total entities grouped by domain (use domain filter for detailed view):\n\n${JSON.stringify(byDomain, null, 2)}`
+            }]
+          };
         }
         
         return {
@@ -311,6 +363,40 @@ async function callTool(name, args, sessionToken = null) {
             text: JSON.stringify(switches, null, 2)
           }]
         };
+        
+      case "get_climate":
+        if (args.entity_id) {
+          // Get specific climate entity
+          const climateEntity = await haRequest(`/states/${args.entity_id}`, {}, sessionToken);
+          return {
+            content: [{
+              type: "text", 
+              text: JSON.stringify(climateEntity, null, 2)
+            }]
+          };
+        } else {
+          // Get all climate entities
+          const allClimateEntities = await haRequest('/states', {}, sessionToken);
+          const climateEntities = allClimateEntities.filter(e => e.entity_id.startsWith('climate.'));
+          
+          // Create simplified response to avoid timeouts
+          const simplifiedClimate = climateEntities.map(entity => ({
+            entity_id: entity.entity_id,
+            state: entity.state,
+            current_temperature: entity.attributes.current_temperature,
+            temperature: entity.attributes.temperature,
+            hvac_mode: entity.attributes.hvac_mode || entity.state,
+            friendly_name: entity.attributes.friendly_name || entity.entity_id,
+            available_modes: entity.attributes.hvac_modes
+          }));
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify(simplifiedClimate, null, 2)
+            }]
+          };
+        }
         
       default:
         throw new Error(`Unknown tool: ${name}`);
