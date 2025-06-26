@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP OAuth Test Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2563eb;
+            margin-bottom: 20px;
+        }
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f8fafc;
+            border-radius: 5px;
+        }
+        .button {
+            background: #2563eb;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .button:hover {
+            background: #1d4ed8;
+        }
+        .input-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #4b5563;
+        }
+        input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #e5e7eb;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+        .result {
+            background: #f1f5f9;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            margin-top: 10px;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        .status.success {
+            background: #dcfce7;
+            color: #166534;
+        }
+        .status.error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>MCP OAuth Test Client</h1>
+
+        <div class="section">
+            <h2>1. Register Client</h2>
+            <div class="input-group">
+                <label for="clientName">Client Name:</label>
+                <input type="text" id="clientName" value="Test Client">
+            </div>
+            <div class="input-group">
+                <label for="redirectUri">Redirect URI:</label>
+                <input type="text" id="redirectUri" value="https://ha-mcp-web.right-api.com/oauth/callback">
+            </div>
+            <button class="button" onclick="registerClient()">Register Client</button>
+            <div id="registerResult" class="result"></div>
+        </div>
+
+        <div class="section">
+            <h2>2. Authorize Client</h2>
+            <button class="button" onclick="authorizeClient()">Start Authorization</button>
+            <div id="authorizeResult" class="result"></div>
+        </div>
+
+        <div class="section">
+            <h2>3. Exchange Code for Token</h2>
+            <div class="input-group">
+                <label for="authCode">Authorization Code:</label>
+                <input type="text" id="authCode">
+            </div>
+            <button class="button" onclick="exchangeCode()">Exchange Code</button>
+            <div id="tokenResult" class="result"></div>
+        </div>
+
+        <div class="section">
+            <h2>4. Test MCP</h2>
+            <div class="input-group">
+                <label for="haUrl">Home Assistant URL:</label>
+                <input type="text" id="haUrl" placeholder="http://your-ha-instance:8123">
+            </div>
+            <div class="input-group">
+                <label for="haToken">Home Assistant Token:</label>
+                <input type="text" id="haToken" placeholder="your-ha-token">
+            </div>
+            <button class="button" onclick="testMCP()">Test MCP</button>
+            <div id="mcpResult" class="result"></div>
+        </div>
+
+        <div class="section">
+            <h2>5. Debug Information</h2>
+            <button class="button" onclick="getDebugInfo()">Get Debug Info</button>
+            <div id="debugResult" class="result"></div>
+        </div>
+    </div>
+
+    <script>
+        let clientId = '';
+        let clientSecret = '';
+        let accessToken = '';
+        const SERVER_URL = 'https://ha-mcp-web.right-api.com';
+
+        async function makeRequest(url, options = {}) {
+            try {
+                const response = await fetch(url, {
+                    ...options,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options.headers
+                    }
+                });
+                const data = await response.json();
+                return data;
+            } catch (error) {
+                return { error: error.message };
+            }
+        }
+
+        async function registerClient() {
+            const clientName = document.getElementById('clientName').value;
+            const redirectUri = document.getElementById('redirectUri').value;
+
+            const result = await makeRequest(`${SERVER_URL}/oauth/register`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    client_name: clientName,
+                    redirect_uris: [redirectUri],
+                    grant_types: ['authorization_code', 'refresh_token'],
+                    response_types: ['code'],
+                    scope: 'homeassistant:read homeassistant:write'
+                })
+            });
+
+            if (result.client_id) {
+                clientId = result.client_id;
+                clientSecret = result.client_secret;
+                document.getElementById('registerResult').textContent = JSON.stringify(result, null, 2);
+            } else {
+                document.getElementById('registerResult').textContent = 'Error: ' + JSON.stringify(result, null, 2);
+            }
+        }
+
+        function authorizeClient() {
+            if (!clientId) {
+                document.getElementById('authorizeResult').textContent = 'Please register a client first';
+                return;
+            }
+
+            const redirectUri = document.getElementById('redirectUri').value;
+            const state = Math.random().toString(36).substring(7);
+            
+            const authUrl = `${SERVER_URL}/oauth/authorize?` +
+                `response_type=code&` +
+                `client_id=${clientId}&` +
+                `redirect_uri=${encodeURIComponent(redirectUri)}&` +
+                `state=${state}&` +
+                `scope=homeassistant:read homeassistant:write`;
+
+            document.getElementById('authorizeResult').textContent = `Opening authorization URL:\n${authUrl}`;
+            window.open(authUrl, '_blank');
+        }
+
+        async function exchangeCode() {
+            if (!clientId || !clientSecret) {
+                document.getElementById('tokenResult').textContent = 'Please register a client first';
+                return;
+            }
+
+            const code = document.getElementById('authCode').value;
+            if (!code) {
+                document.getElementById('tokenResult').textContent = 'Please enter an authorization code';
+                return;
+            }
+
+            const redirectUri = document.getElementById('redirectUri').value;
+            const result = await makeRequest(`${SERVER_URL}/oauth/token`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    grant_type: 'authorization_code',
+                    code: code,
+                    redirect_uri: redirectUri,
+                    client_id: clientId,
+                    client_secret: clientSecret
+                })
+            });
+
+            if (result.access_token) {
+                accessToken = result.access_token;
+                document.getElementById('tokenResult').textContent = JSON.stringify(result, null, 2);
+            } else {
+                document.getElementById('tokenResult').textContent = 'Error: ' + JSON.stringify(result, null, 2);
+            }
+        }
+
+        async function testMCP() {
+            if (!accessToken) {
+                document.getElementById('mcpResult').textContent = 'Please complete the OAuth flow first';
+                return;
+            }
+
+            const haUrl = document.getElementById('haUrl').value;
+            const haToken = document.getElementById('haToken').value;
+
+            if (!haUrl || !haToken) {
+                document.getElementById('mcpResult').textContent = 'Please enter Home Assistant URL and token';
+                return;
+            }
+
+            const result = await makeRequest(`${SERVER_URL}/mcp`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'ha-url': haUrl,
+                    'ha-token': haToken
+                },
+                body: JSON.stringify({
+                    jsonrpc: '2.0',
+                    id: 1,
+                    method: 'initialize'
+                })
+            });
+
+            document.getElementById('mcpResult').textContent = JSON.stringify(result, null, 2);
+        }
+
+        async function getDebugInfo() {
+            const result = await makeRequest(`${SERVER_URL}/debug/oauth-detailed`);
+            document.getElementById('debugResult').textContent = JSON.stringify(result, null, 2);
+        }
+    </script>
+</body>
+</html> 

@@ -1,0 +1,21 @@
+FROM node:20-slim
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm install
+
+# Copy proxy file
+COPY mcp-proxy.js ./
+
+# Create necessary directories
+RUN mkdir -p data
+
+# Expose port
+EXPOSE 3002
+
+# Start the proxy server
+CMD ["node", "mcp-proxy.js"] 

@@ -1,0 +1,13 @@
+<!DOCTYPE html><html><head><title>Login</title></head><body>
+    <h2>Login to Authorize</h2>
+    <form method="POST" action="/authorize">
+      <input type="hidden" name="client_id" value="dummy_client_id" />
+      <input type="hidden" name="redirect_uri" value="https://example.com/callback" />
+      <input type="hidden" name="state" value="abc123" />
+      <input type="hidden" name="code_challenge" value="xyz" />
+      <input type="hidden" name="code_challenge_method" value="S256" />
+      <input type="hidden" name="response_type" value="code" />
+      <label>Email: <input name="email" type="email" required /></label><br/>
+      <label>Password: <input name="password" type="password" required /></label><br/>
+      <button type="submit">Login & Authorize</button>
+    </form></body></html>

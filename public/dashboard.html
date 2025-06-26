@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HA MCP Bridge - Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div x-data="dashboard()" x-init="init()" class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <div class="flex justify-between items-center">
+                <div>
+                    <h1 class="text-3xl font-bold text-gray-800">HA MCP Bridge Dashboard</h1>
+                    <p class="text-gray-600 mt-2">Manage your Home Assistant connections</p>
+                </div>
+                <div class="flex space-x-4">
+                    <button @click="showLogin = !showLogin" 
+                            x-show="!isLoggedIn"
+                            class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg">
+                        Login
+                    </button>
+                    <button @click="logout()" 
+                            x-show="isLoggedIn"
+                            class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg">
+                        Logout
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Welcome Message -->
+        <div x-show="!isLoggedIn && !showLogin && !showRegister" class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h2 class="text-xl font-semibold mb-4">Welcome to HA MCP Bridge</h2>
+            <p class="text-gray-600 mb-4">Connect your Home Assistant to Claude via the Model Context Protocol.</p>
+            <div class="space-y-4">
+                <button @click="showLogin = true" 
+                        class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg mr-4">
+                    Login with API Key
+                </button>
+                <button @click="showRegister = true" 
+                        class="bg-green-500 hover:bg-green-600 text-white px-6 py-2 rounded-lg">
+                    Register New Account
+                </button>
+            </div>
+        </div>
+
+        <!-- Login Form -->
+        <div x-show="showLogin && !isLoggedIn" class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h2 class="text-xl font-semibold mb-4">Login with API Key</h2>
+            <div class="flex space-x-4">
+                <input type="password" 
+                       x-model="loginApiKey" 
+                       placeholder="Enter your API key"
+                       class="flex-1 border border-gray-300 rounded-lg px-3 py-2"
+                       @keyup.enter="login()">
+                <button @click="login()" 
+                        class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg">
+                    Login
+                </button>
+            </div>
+            <p class="text-sm text-gray-500 mt-2">
+                Don't have an API key? <a href="#" @click="showRegister = true; showLogin = false" class="text-blue-500">Register here</a>
+            </p>
+        </div>
+
+        <!-- Registration Form -->
+        <div x-show="showRegister && !isLoggedIn" class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h2 class="text-xl font-semibold mb-4">Register New Account</h2>
+            <div class="grid grid-cols-1 gap-4">
+                <input type="email" 
+                       x-model="registerForm.email" 
+                       placeholder="Email address"
+                       class="border border-gray-300 rounded-lg px-3 py-2">
+                <input type="url" 
+                       x-model="registerForm.haUrl" 
+                       placeholder="Home Assistant URL (e.g., http://homeassistant.local:8123)"
+                       class="border border-gray-300 rounded-lg px-3 py-2">
+                <input type="password" 
+                       x-model="registerForm.haToken" 
+                       placeholder="Home Assistant Long-Lived Access Token"
+                       class="border border-gray-300 rounded-lg px-3 py-2">
+            </div>
+            <div class="flex space-x-4 mt-4">
+                <button @click="register()" 
+                        class="bg-green-500 hover:bg-green-600 text-white px-6 py-2 rounded-lg">
+                    Register
+                </button>
+                <button @click="showRegister = false" 
+                        class="bg-gray-500 hover:bg-gray-600 text-white px-6 py-2 rounded-lg">
+                    Cancel
+                </button>
+            </div>
+            <div class="mt-4 p-4 bg-blue-50 rounded-lg">
+                <p class="text-sm text-blue-800"><strong>How to get a Home Assistant token:</strong></p>
+                <ol class="text-sm text-blue-700 mt-2 list-decimal list-inside">
+                    <li>Open Home Assistant</li>
+                    <li>Go to Profile → Security → Long-Lived Access Tokens</li>
+                    <li>Click "Create Token"</li>
+                    <li>Copy the generated token</li>
+                </ol>
+            </div>
+        </div>
+
+        <!-- User Info -->
+        <div x-show="isLoggedIn && userInfo" class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h2 class="text-xl font-semibold mb-4">Account Information</h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Email</label>
+                    <p class="mt-1 text-sm text-gray-900" x-text="userInfo.email"></p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Created</label>
+                    <p class="mt-1 text-sm text-gray-900" x-text="formatDate(userInfo.createdAt)"></p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Last Used</label>
+                    <p class="mt-1 text-sm text-gray-900" x-text="formatDate(userInfo.lastUsed)"></p>
+                </div>
+            </div>
+            <div class="mt-4">
+                <label class="block text-sm font-medium text-gray-700">Request Count</label>
+                <p class="mt-1 text-sm text-gray-900" x-text="userInfo.requestCount || 0"></p>
+            </div>
+        </div>
+
+        <!-- API Key Management -->
+        <div x-show="isLoggedIn" class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold">API Key</h2>
+                <button @click="regenerateApiKey()" 
+                        class="bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded-lg text-sm">
+                    Regenerate Key
+                </button>
+            </div>
+            <div class="flex items-center space-x-4">
+                <input :type="showApiKey ? 'text' : 'password'" 
+                       :value="currentApiKey" 
+                       readonly
+                       class="flex-1 border border-gray-300 rounded-lg px-3 py-2 bg-gray-50">
+                <button @click="copyApiKey()" 
+                        class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg">
+                    Copy
+                </button>
+                <button @click="showApiKey = !showApiKey" 
+                        class="bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-lg">
+                    <span x-text="showApiKey ? 'Hide' : 'Show'"></span>
+                </button>
+            </div>
+            <p class="text-sm text-gray-500 mt-2">
+                ⚠️ Keep this key secure! It provides access to your Home Assistant.
+            </p>
+        </div>
+
+        <!-- Home Assistant Configuration -->
+        <div x-show="isLoggedIn" class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold">Home Assistant Configuration</h2>
+                <div class="space-x-2">
+                    <button @click="testConnection()" 
+                            class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg text-sm">
+                        Test Connection
+                    </button>
+                    <button @click="editMode = !editMode" 
+                            class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg text-sm">
+                        <span x-text="editMode ? 'Cancel' : 'Edit'"></span>
+                    </button>
+                </div>
+            </div>
+            
+            <div x-show="!editMode" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Home Assistant URL</label>
+                    <p class="mt-1 text-sm text-gray-900" x-text="userInfo?.haUrl"></p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Access Token</label>
+                    <p class="mt-1 text-sm text-gray-900">••••••••••••••••</p>
+                </div>
+            </div>
+
+            <div x-show="editMode" class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Home Assistant URL</label>
+                    <input type="url" 
+                           x-model="editForm.haUrl" 
+                           class="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Access Token</label>
+                    <input type="password" 
+                           x-model="editForm.haToken" 
+                           placeholder="Enter new token or leave blank to keep current"
+                           class="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2">
+                </div>
+                <div class="flex space-x-4">
+                    <button @click="updateConfiguration()" 
+                            class="bg-green-500 hover:bg-green-600 text-white px-6 py-2 rounded-lg">
+                        Save Changes
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Claude Desktop Configuration -->
+        <div x-show="isLoggedIn" class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h2 class="text-xl font-semibold mb-4">Claude Desktop Configuration</h2>
+            <p class="text-sm text-gray-600 mb-4">
+                Copy this configuration to your Claude Desktop settings:
+            </p>
+            <div class="bg-gray-100 rounded-lg p-4 relative">
+                <pre class="text-sm overflow-x-auto"><code x-text="claudeConfig"></code></pre>
+                <button @click="copyClaudeConfig()" 
+                        class="absolute top-2 right-2 bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded text-sm">
+                    Copy
+                </button>
+            </div>
+            <div class="mt-4 p-4 bg-green-50 rounded-lg">
+                <p class="text-sm text-green-800"><strong>Setup Instructions:</strong></p>
+                <ol class="text-sm text-green-700 mt-2 list-decimal list-inside">
+                    <li>Copy the configuration above</li>
+                    <li>Open Claude Desktop settings</li>
+                    <li>Paste the configuration in the MCP servers section</li>
+                    <li>Restart Claude Desktop</li>
+                    <li>You can now ask Claude to control your Home Assistant!</li>
+                </ol>
+            </div>
+        </div>
+
+        <!-- Usage Statistics -->
+        <div x-show="isLoggedIn" class="bg-white rounded-lg shadow-md p-6">
+            <h2 class="text-xl font-semibold mb-4">Usage Statistics</h2>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div class="text-center">
+                    <div class="text-2xl font-bold text-blue-500" x-text="userInfo?.requestCount || 0"></div>
+                    <div class="text-sm text-gray-600">Total Requests</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-2xl font-bold text-green-500">99.9%</div>
+                    <div class="text-sm text-gray-600">Uptime</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-2xl font-bold text-purple-500">< 100ms</div>
+                    <div class="text-sm text-gray-600">Avg Response</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-2xl font-bold text-orange-500">Free</div>
+                    <div class="text-sm text-gray-600">Current Plan</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Alerts -->
+        <div x-show="alert.show" 
+             class="fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 max-w-sm"
+             :class="alert.type === 'success' ? 'bg-green-500' : 'bg-red-500'"
+             x-transition>
+            <div class="flex items-center">
+                <span class="text-white flex-1" x-text="alert.message"></span>
+                <button @click="alert.show = false" class="ml-4 text-white hover:text-gray-200">
+                    ✕
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function dashboard() {
+            return {
+                isLoggedIn: false,
+                showLogin: false,
+                showRegister: false,
+                showApiKey: false,
+                editMode: false,
+                currentApiKey: '',
+                loginApiKey: '',
+                userInfo: null,
+                alert: { show: false, message: '', type: 'success' },
+                registerForm: {
+                    email: '',
+                    haUrl: 'http://homeassistant.local:8123',
+                    haToken: ''
+                },
+                editForm: {
+                    haUrl: '',
+                    haToken: ''
+                },
+
+                async init() {
+                    // Check if user is already logged in
+                    const apiKey = localStorage.getItem('ha_mcp_api_key');
+                    if (apiKey) {
+                        this.currentApiKey = apiKey;
+                        await this.loadUserInfo();
+                    }
+                },
+
+                async login() {
+                    if (!this.loginApiKey) {
+                        this.showAlert('Please enter your API key', 'error');
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch('/api/user/info', {
+                            headers: {
+                                'Authorization': `Bearer ${this.loginApiKey}`
+                            }
+                        });
+
+                        if (response.ok) {
+                            this.currentApiKey = this.loginApiKey;
+                            localStorage.setItem('ha_mcp_api_key', this.loginApiKey);
+                            this.isLoggedIn = true;
+                            this.showLogin = false;
+                            await this.loadUserInfo();
+                            this.showAlert('Login successful!', 'success');
+                        } else {
+                            this.showAlert('Invalid API key', 'error');
+                        }
+                    } catch (error) {
+                        this.showAlert('Login failed', 'error');
+                    }
+                },
+
+                logout() {
+                    localStorage.removeItem('ha_mcp_api_key');
+                    this.isLoggedIn = false;
+                    this.userInfo = null;
+                    this.currentApiKey = '';
+                    this.showLogin = false;
+                    this.showRegister = false;
+                    this.showAlert('Logged out successfully', 'success');
+                },
+
+                async register() {
+                    if (!this.registerForm.email || !this.registerForm.haUrl || !this.registerForm.haToken) {
+                        this.showAlert('Please fill in all fields', 'error');
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch('/register', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(this.registerForm)
+                        });
+
+                        const result = await response.json();
+
+                        if (response.ok) {
+                            this.currentApiKey = result.apiKey;
+                            localStorage.setItem('ha_mcp_api_key', result.apiKey);
+                            this.isLoggedIn = true;
+                            this.showRegister = false;
+                            await this.loadUserInfo();
+                            this.showAlert('Registration successful! Your API key has been saved.', 'success');
+                        } else {
+                            this.showAlert(result.error || 'Registration failed', 'error');
+                        }
+                    } catch (error) {
+                        this.showAlert('Registration failed', 'error');
+                    }
+                },
+
+                async loadUserInfo() {
+                    try {
+                        const response = await fetch('/api/user/info', {
+                            headers: {
+                                'Authorization': `Bearer ${this.currentApiKey}`
+                            }
+                        });
+
+                        if (response.ok) {
+                            this.userInfo = await response.json();
+                            this.isLoggedIn = true;
+                            this.editForm.haUrl = this.userInfo.haUrl;
+                        } else {
+                            // Invalid API key, clear storage
+                            localStorage.removeItem('ha_mcp_api_key');
+                            this.currentApiKey = '';
+                            this.isLoggedIn = false;
+                        }
+                    } catch (error) {
+                        console.error('Failed to load user info:', error);
+                    }
+                },
+
+                async updateConfiguration() {
+                    try {
+                        const updateData = {
+                            haUrl: this.editForm.haUrl
+                        };
+
+                        if (this.editForm.haToken) {
+                            updateData.haToken = this.editForm.haToken;
+                        }
+
+                        const response = await fetch('/api/user/update', {
+                            method: 'PUT',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${this.currentApiKey}`
+                            },
+                            body: JSON.stringify(updateData)
+                        });
+
+                        if (response.ok) {
+                            await this.loadUserInfo();
+                            this.editMode = false;
+                            this.editForm.haToken = '';
+                            this.showAlert('Configuration updated successfully', 'success');
+                        } else {
+                            const error = await response.json();
+                            this.showAlert(error.error || 'Update failed', 'error');
+                        }
+                    } catch (error) {
+                        this.showAlert('Update failed', 'error');
+                    }
+                },
+
+                async testConnection() {
+                    try {
+                        const response = await fetch('/api/user/test', {
+                            headers: {
+                                'Authorization': `Bearer ${this.currentApiKey}`
+                            }
+                        });
+
+                        const result = await response.json();
+                        if (response.ok) {
+                            this.showAlert(`Connection successful! HA Version: ${result.haVersion || 'Unknown'}`, 'success');
+                        } else {
+                            this.showAlert(result.error || 'Connection test failed', 'error');
+                        }
+                    } catch (error) {
+                        this.showAlert('Connection test failed', 'error');
+                    }
+                },
+
+                async regenerateApiKey() {
+                    if (!confirm('Are you sure? This will invalidate your current API key and you\'ll need to update Claude Desktop.')) {
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch('/api/user/regenerate-key', {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${this.currentApiKey}`
+                            }
+                        });
+
+                        if (response.ok) {
+                            const result = await response.json();
+                            this.currentApiKey = result.apiKey;
+                            localStorage.setItem('ha_mcp_api_key', result.apiKey);
+                            this.showAlert('API key regenerated successfully', 'success');
+                        } else {
+                            this.showAlert('Failed to regenerate API key', 'error');
+                        }
+                    } catch (error) {
+                        this.showAlert('Failed to regenerate API key', 'error');
+                    }
+                },
+
+                copyApiKey() {
+                    navigator.clipboard.writeText(this.currentApiKey).then(() => {
+                        this.showAlert('API key copied to clipboard', 'success');
+                    }).catch(() => {
+                        this.showAlert('Failed to copy API key', 'error');
+                    });
+                },
+
+                copyClaudeConfig() {
+                    navigator.clipboard.writeText(this.claudeConfig).then(() => {
+                        this.showAlert('Configuration copied to clipboard', 'success');
+                    }).catch(() => {
+                        this.showAlert('Failed to copy configuration', 'error');
+                    });
+                },
+
+                get claudeConfig() {
+                    return JSON.stringify({
+                        mcpServers: {
+                            homeassistant: {
+                                command: "npx",
+                                args: ["mcp-remote", window.location.origin],
+                                env: {
+                                    MCP_API_KEY: this.currentApiKey
+                                }
+                            }
+                        }
+                    }, null, 2);
+                },
+
+                formatDate(dateString) {
+                    if (!dateString) return 'Never';
+                    return new Date(dateString).toLocaleDateString();
+                },
+
+                showAlert(message, type = 'success') {
+                    this.alert = { show: true, message, type };
+                    setTimeout(() => {
+                        this.alert.show = false;
+                    }, 5000);
+                }
+            }
+        }
+    </script>
+</body>
+</html>

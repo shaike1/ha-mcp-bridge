@@ -1,0 +1,9 @@
+{
+  "name": "ha-mcp-bridge-http",
+  "http": {
+    "url": "https://ha-mcp.right-api.com/",
+    "headers": {
+      "Authorization": "Bearer admin_c5d4265e8319384af9f8e0e3ca503b07da4cf360b7a84acaafe326a249c92c21"
+    }
+  }
+} 

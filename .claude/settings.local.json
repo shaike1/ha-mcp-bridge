@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node server.js)",
+      "Bash(curl:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker restart:*)",
+      "Bash(docker logs:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(pm2 restart:*)",
+      "Bash(docker inspect:*)",
+      "Bash(pkill:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker:*)",
+      "Bash(timeout 30 docker logs ha-mcp-bridge --follow)",
+      "Bash(timeout 60 docker logs ha-mcp-bridge --follow)",
+      "Bash(sed:*)",
+      "Bash(mkdir:*)",
+      "Bash(npm install)",
+      "Bash(node:*)",
+      "Bash(timeout:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(cp:*)"
+    ],
+    "deny": []
+  }
+}
