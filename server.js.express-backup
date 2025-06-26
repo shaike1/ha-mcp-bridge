@@ -1,0 +1,700 @@
+#!/usr/bin/env node
+
+import express from 'express';
+
+// Home Assistant Configuration
+const PORT = process.env.PORT || 3001;
+const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
+
+console.log('HA MCP Configuration:');
+console.log('PORT:', PORT);
+console.log('SERVER_URL:', SERVER_URL);
+console.log('Admin auth configured');
+
+// Create Express app
+const app = express();
+
+// Body parsing middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// CORS middleware + request logging
+app.use((req, res, next) => {
+  console.log(`📥 ${req.method} ${req.url} - User-Agent: ${req.headers['user-agent'] || 'Unknown'}`);
+  console.log(`📥 All Headers:`, JSON.stringify(req.headers, null, 2));
+  
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, anthropic-beta');
+  
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
+
+// Home Assistant tools
+const haTools = [
+  {
+    name: 'get_entities',
+    description: 'Get all Home Assistant entities or filter by domain',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { 
+          type: 'string', 
+          description: 'Filter by domain (light, switch, sensor, etc.)' 
+        }
+      },
+      required: []
+    }
+  },
+  {
+    name: 'call_service',
+    description: 'Call a Home Assistant service to control devices',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Service domain' },
+        service: { type: 'string', description: 'Service name' },
+        entity_id: { type: 'string', description: 'Target entity ID' },
+        data: { type: 'object', description: 'Additional service data' }
+      },
+      required: ['domain', 'service']
+    }
+  },
+  {
+    name: 'get_automations',
+    description: 'Get all Home Assistant automations',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: 'get_lights',
+    description: 'Get all light entities',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: 'get_switches',
+    description: 'Get all switch entities',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
+  }
+];
+
+
+// OAuth discovery endpoint
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  res.json({
+    issuer: SERVER_URL,
+    authorization_endpoint: `${SERVER_URL}/oauth/authorize`,
+    token_endpoint: `${SERVER_URL}/oauth/token`,
+    registration_endpoint: `${SERVER_URL}/oauth/register`,
+    scopes_supported: ['mcp'],
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
+    code_challenge_methods_supported: ['S256']
+  });
+});
+
+// OpenAI Plugin manifest for Claude.ai discovery
+app.get('/.well-known/ai-plugin.json', (req, res) => {
+  console.log('OpenAI Plugin: ai-plugin.json manifest request');
+  
+  const manifest = {
+    schema_version: "v1",
+    name_for_human: "Home Assistant",
+    name_for_model: "home_assistant",
+    description_for_human: "Control your Home Assistant smart home devices through AI",
+    description_for_model: "Plugin for accessing Home Assistant entities, services, and automation tools. Allows listing entities, calling services, managing lights, switches, and automations.",
+    auth: {
+      type: "oauth",
+      authorization_url: `${SERVER_URL}/oauth/authorize`,
+      scope: "mcp"
+    },
+    api: {
+      type: "openapi",
+      url: `${SERVER_URL}/tools`,
+      is_user_authenticated: true
+    },
+    logo_url: `${SERVER_URL}/logo.png`,
+    contact_email: "admin@ha-mcp.right-api.com",
+    legal_info_url: `${SERVER_URL}/legal`
+  };
+  
+  res.json(manifest);
+});
+
+// OpenAI Plugin tools endpoint
+app.get('/tools', (req, res) => {
+  console.log('OpenAI Plugin: GET /tools request');
+  
+  try {
+    // Convert MCP tools to OpenAI format
+    const openAITools = haTools.map(tool => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema
+      }
+    }));
+    
+    res.json({ tools: openAITools });
+    console.log(`OpenAI Plugin: Sent ${openAITools.length} tools`);
+  } catch (error) {
+    console.error('OpenAI Plugin: Error sending tools:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    server: 'Express + MCP SDK'
+  });
+});
+
+// Clear authentication state endpoint
+app.post('/admin/clear-auth', (req, res) => {
+  const { admin_password } = req.body;
+  
+  if (admin_password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: 'Invalid admin password' });
+  }
+  
+  // Clear all authentication state
+  global.authCodes = new Map();
+  global.accessTokens = new Map();
+  
+  console.log('🧹 ADMIN: Cleared all authentication state');
+  res.json({ 
+    message: 'Authentication state cleared', 
+    timestamp: new Date().toISOString() 
+  });
+});
+
+// OAuth authorization page - simplified API token approach
+app.get('/oauth/authorize', (req, res) => {
+  const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope } = req.query;
+  
+  res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Home Assistant MCP Server - API Token Auth</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 400px; margin: 100px auto; padding: 20px; background: #f5f5f5; }
+        .login-box { background: white; border-radius: 10px; padding: 40px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .title { text-align: center; color: #333; margin-bottom: 30px; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; color: #555; }
+        input { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 5px; font-size: 16px; box-sizing: border-box; }
+        .btn { width: 100%; padding: 12px; background: #007cba; color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; }
+        .btn:hover { background: #005a87; }
+        .info { background: #e7f3ff; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h2 class="title">Home Assistant MCP Server</h2>
+        
+        <div class="info">
+            <strong>Claude.ai</strong> is requesting access to your Home Assistant devices.
+            Please provide your API token for authentication.
+        </div>
+        
+        <form method="POST" action="/oauth/login">
+            <input type="hidden" name="client_id" value="${client_id || ''}">
+            <input type="hidden" name="redirect_uri" value="${redirect_uri || ''}">
+            <input type="hidden" name="state" value="${state || ''}">
+            <input type="hidden" name="code_challenge" value="${code_challenge || ''}">
+            <input type="hidden" name="code_challenge_method" value="${code_challenge_method || ''}">
+            <input type="hidden" name="scope" value="${scope || ''}">
+            
+            <div class="form-group">
+                <label for="api_token">Home Assistant API Token:</label>
+                <input type="password" id="api_token" name="api_token" placeholder="Your Home Assistant Long-Lived Access Token" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="ha_host">Home Assistant URL:</label>
+                <input type="url" id="ha_host" name="ha_host" placeholder="https://your-homeassistant.com" value="https://ha.right-api.com" required>
+            </div>
+            
+            <button type="submit" class="btn">Connect with API Token</button>
+        </form>
+    </div>
+</body>
+</html>`);
+});
+
+// OAuth login handler - simplified API token approach
+app.post('/oauth/login', (req, res) => {
+  const { api_token, ha_host, client_id, redirect_uri, state, code_challenge, code_challenge_method, scope } = req.body;
+  
+  // Validate required fields
+  if (!api_token || !ha_host) {
+    return res.status(400).send('API token and Home Assistant URL are required');
+  }
+  
+  // Generate authorization code
+  const authCode = 'auth_' + Math.random().toString(36).substring(2, 15);
+  
+  // Store the code with HA config
+  const authData = {
+    client_id,
+    redirect_uri,
+    state,
+    code_challenge,
+    code_challenge_method,
+    scope,
+    ha_host,
+    ha_token: api_token, // Use the API token directly
+    username: 'api-user', // Simple user identifier
+    expires: Date.now() + 10 * 60 * 1000 // 10 minutes
+  };
+  
+  // Store in memory (in production, use proper storage)
+  global.authCodes = global.authCodes || new Map();
+  global.authCodes.set(authCode, authData);
+  
+  console.log(`OAuth authorization successful for API user`);
+  console.log(`HA Config - Host: ${ha_host}, Token: ${api_token ? '[SET]' : '[NOT SET]'}`);
+  
+  // Redirect back to Claude.ai with authorization code
+  const redirectUrl = new URL(redirect_uri);
+  redirectUrl.searchParams.set('code', authCode);
+  redirectUrl.searchParams.set('state', state);
+  
+  res.redirect(redirectUrl.toString());
+});
+
+// OAuth token endpoint
+app.post('/oauth/token', (req, res) => {
+  const { code, code_verifier, client_id, grant_type } = req.body;
+  
+  global.authCodes = global.authCodes || new Map();
+  const authData = global.authCodes.get(code);
+  
+  if (!authData || authData.expires < Date.now()) {
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'Authorization code expired or invalid' });
+  }
+  
+  if (authData.client_id !== client_id) {
+    return res.status(400).json({ error: 'invalid_client', error_description: 'Client ID mismatch' });
+  }
+  
+  // Generate access token
+  const accessToken = 'mcp_token_' + Math.random().toString(36).substring(2, 15);
+  
+  // Store token with user's HA config
+  global.accessTokens = global.accessTokens || new Map();
+  global.accessTokens.set(accessToken, {
+    username: authData.username,
+    ha_host: authData.ha_host,
+    ha_token: authData.ha_token,
+    expires: Date.now() + 365 * 24 * 60 * 60 * 1000 // 1 year
+  });
+  
+  // Clean up auth code
+  global.authCodes.delete(code);
+  
+  console.log(`OAuth token issued for API user: ${authData.username}`);
+  console.log(`Access token: ${accessToken}`);
+  
+  res.json({
+    access_token: accessToken,
+    token_type: 'Bearer',
+    expires_in: 365 * 24 * 60 * 60, // 1 year
+    scope: 'mcp'
+  });
+});
+
+// Alternative endpoint to avoid caching issues
+app.all('/mcp', async (req, res) => {
+  return handleMCPEndpoint(req, res);
+});
+
+// Root endpoint for Claude.ai discovery and MCP  
+app.all('/', async (req, res) => {
+  // Check if this is an SSE request first
+  const acceptHeader = req.headers.accept || '';
+  const isSSE = acceptHeader.includes('text/event-stream');
+  
+  if (req.method === 'GET' && isSSE) {
+    // This is an SSE request, handle it with MCP endpoint
+    return handleMCPEndpoint(req, res);
+  } else if (req.method === 'GET') {
+    // Regular GET request, return server info (match N8N format exactly)
+    res.json({
+      name: 'Home Assistant MCP Server',
+      version: '2.0.0',
+      description: 'Home Assistant Model Context Protocol Server with Streamable HTTP',
+      transport: 'streamable-http',
+      protocol: '2024-11-05',
+      capabilities: {
+        tools: {
+          listChanged: true
+        },
+        prompts: {}
+      }
+    });
+    return;
+  }
+  
+  // Handle MCP POST requests at root endpoint
+  return handleMCPEndpoint(req, res);
+});
+
+// Shared MCP handling function
+async function handleMCPEndpoint(req, res) {
+  console.log(`${req.method} ${req.url}`);
+  
+  // Check if this is an SSE request
+  const acceptHeader = req.headers.accept || '';
+  const isSSE = acceptHeader.includes('text/event-stream');
+  
+  console.log(`DEBUG: Method=${req.method}, Accept=${acceptHeader}, isSSE=${isSSE}`);
+  
+  if (req.method === 'GET' && isSSE) {
+    console.log('STREAMABLE HTTP: Upgrading to SSE connection');
+    
+    // Set SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id, Last-Event-ID, Accept'
+    });
+    
+    // Track connection state
+    let connectionClosed = false;
+    
+    // Handle connection close
+    req.on('close', () => {
+      console.log('STREAMABLE HTTP: SSE connection closed');
+      connectionClosed = true;
+    });
+    
+    // Send tools immediately - direct approach
+    try {
+      console.log(`STREAMABLE HTTP: Immediately sending ${haTools.length} tools via SSE`);
+      
+      // Send tools as JSON-RPC response (what Claude.ai expects)
+      const toolsResponse = {
+        jsonrpc: '2.0',
+        id: null,
+        result: {
+          tools: haTools
+        }
+      };
+      
+      console.log(`STREAMABLE HTTP: Sending tools/list response over SSE`);
+      res.write(`data: ${JSON.stringify(toolsResponse)}\n\n`);
+      
+    } catch (err) {
+      console.error('STREAMABLE HTTP: Error sending tools over SSE:', err);
+    }
+    
+    return;
+  } else if (req.method === 'GET') {
+    // Regular GET - return server info
+    res.json({
+      name: 'N8N MCP Server',
+      version: '1.0.0',
+      description: 'N8N Model Context Protocol Server with Streamable HTTP',
+      transport: 'streamable-http',
+      protocol: '2024-11-05',
+      capabilities: {
+        tools: {
+          listChanged: true
+        },
+        prompts: {}
+      }
+    });
+    return;
+  }
+  
+  if (req.method === 'POST') {
+    // Handle MCP JSON-RPC requests manually
+    try {
+      const message = req.body;
+      console.log('MCP Request:', message.method);
+      
+      // Check for authentication header
+      const authHeader = req.headers.authorization;
+      console.log('Auth header:', authHeader ? 'Bearer token present' : 'No auth header');
+      
+      // Allow OAuth flow to complete, then require authentication
+      let hasValidAuth = false;
+      
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.substring(7); // Remove 'Bearer '
+        const tokenData = global.accessTokens?.get(token);
+        
+        if (tokenData && tokenData.expires > Date.now()) {
+          console.log(`✅ Authenticated user: ${tokenData.username}`);
+          console.log(`HA Config: ${tokenData.ha_host}, Token: ${tokenData.ha_token ? '[SET]' : '[NOT SET]'}`);
+          hasValidAuth = true;
+        } else {
+          console.log('⚠️  Invalid or expired access token');
+        }
+      } else {
+        console.log('ℹ️  No authentication provided');
+      }
+      
+      // Always require authentication for ALL requests (match N8N exactly)
+      if (!hasValidAuth) {
+        console.log('❌ Authentication required - user must complete OAuth flow');
+        return res.json({
+          jsonrpc: '2.0',
+          id: message.id,
+          error: {
+            code: -32001,
+            message: 'Unauthorized - OAuth authentication required',
+            data: {
+              auth_url: `${SERVER_URL}/.well-known/oauth-authorization-server`
+            }
+          }
+        });
+      }
+      
+      let result = null;
+      
+      switch (message.method) {
+        case 'initialize':
+          console.log('✅ INITIALIZE: Claude.ai connecting with authentication');
+          result = {
+            protocolVersion: "2024-11-05",
+            capabilities: {
+              tools: {
+                listChanged: true
+              },
+              prompts: {}
+            },
+            serverInfo: {
+              name: "HA MCP Bridge",
+              version: "2.0.0",
+              userMode: false
+            }
+          };
+          break;
+          
+        case 'tools/list':
+          console.log('✅ NORMAL: tools/list requested (standard MCP protocol)');
+          result = {
+            tools: haTools
+          };
+          break;
+          
+        case 'prompts/list':
+          console.log('🔧 CLAUDE.AI BUG WORKAROUND: prompts/list hack - sending tools instead');
+          result = {
+            tools: haTools
+          };
+          break;
+          
+        case 'resources/list':
+          console.log('🔧 ULTIMATE HACK: Claude.ai requested resources/list, sending tools instead');
+          result = {
+            tools: haTools
+          };
+          break;
+          
+        case 'notifications/initialized':
+          console.log('✅ NOTIFICATIONS: Claude.ai sent initialized notification');
+          result = {}; // Empty response for notification
+          
+          // HACK: Force send tools list since Claude.ai won't request it
+          setTimeout(() => {
+            console.log('HACK: Force-sending tools/list as separate response');
+            const toolsResponse = {
+              jsonrpc: '2.0',
+              method: 'tools/list',
+              id: 'force-tools-' + Date.now(),
+              result: {
+                tools: haTools
+              }
+            };
+            
+            try {
+              res.write(JSON.stringify(toolsResponse) + '\n');
+              console.log('HACK: Forced tools/list response sent');
+            } catch (err) {
+              console.error('HACK: Error force-sending tools:', err);
+            }
+          }, 50);
+          
+          break;
+          
+        case 'tools/call':
+          const { name, arguments: args } = message.params;
+          console.log(`Tool called: ${name}`, args);
+          
+          // Get HA credentials from authenticated user
+          const userToken = authHeader.substring(7);
+          const userData = global.accessTokens?.get(userToken);
+          const haHost = userData?.ha_host;
+          const haToken = userData?.ha_token;
+          
+          let toolResult = {};
+          
+          if (!haHost || !haToken) {
+            toolResult = { error: 'Home Assistant credentials not configured' };
+          } else {
+            try {
+              // Make actual API calls to Home Assistant
+              switch (name) {
+                case 'get_entities':
+                  const entitiesUrl = `${haHost}/api/states`;
+                  console.log(`Calling HA API: ${entitiesUrl}`);
+                  
+                  const entitiesResponse = await fetch(entitiesUrl, {
+                    headers: {
+                      'Authorization': `Bearer ${haToken}`,
+                      'Content-Type': 'application/json'
+                    }
+                  });
+                  
+                  if (entitiesResponse.ok) {
+                    const entities = await entitiesResponse.json();
+                    const filteredEntities = args.domain 
+                      ? entities.filter(e => e.entity_id.startsWith(args.domain + '.'))
+                      : entities;
+                    toolResult = { 
+                      entities: filteredEntities.slice(0, 10), // Limit for readability
+                      total_count: filteredEntities.length,
+                      domain_filter: args.domain || 'all'
+                    };
+                  } else {
+                    toolResult = { error: `HA API error: ${entitiesResponse.status}` };
+                  }
+                  break;
+                  
+                case 'get_lights':
+                  const lightsUrl = `${haHost}/api/states`;
+                  const lightsResponse = await fetch(lightsUrl, {
+                    headers: {
+                      'Authorization': `Bearer ${haToken}`,
+                      'Content-Type': 'application/json'
+                    }
+                  });
+                  
+                  if (lightsResponse.ok) {
+                    const entities = await lightsResponse.json();
+                    const lights = entities.filter(e => e.entity_id.startsWith('light.'));
+                    toolResult = { 
+                      lights: lights.slice(0, 10),
+                      total_count: lights.length
+                    };
+                  } else {
+                    toolResult = { error: `HA API error: ${lightsResponse.status}` };
+                  }
+                  break;
+                  
+                case 'get_switches':
+                  const switchesUrl = `${haHost}/api/states`;
+                  const switchesResponse = await fetch(switchesUrl, {
+                    headers: {
+                      'Authorization': `Bearer ${haToken}`,
+                      'Content-Type': 'application/json'
+                    }
+                  });
+                  
+                  if (switchesResponse.ok) {
+                    const entities = await switchesResponse.json();
+                    const switches = entities.filter(e => e.entity_id.startsWith('switch.'));
+                    toolResult = { 
+                      switches: switches.slice(0, 10),
+                      total_count: switches.length
+                    };
+                  } else {
+                    toolResult = { error: `HA API error: ${switchesResponse.status}` };
+                  }
+                  break;
+                  
+                default:
+                  toolResult = { error: `Tool ${name} not implemented yet` };
+              }
+            } catch (error) {
+              console.error('HA API call failed:', error);
+              toolResult = { error: `Failed to call Home Assistant: ${error.message}` };
+            }
+          }
+          
+          result = {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(toolResult, null, 2)
+              }
+            ]
+          };
+          break;
+          
+        default:
+          throw new Error(`Unknown method: ${message.method}`);
+      }
+      
+      res.json({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: result
+      });
+      
+      // Auto-send tools notification after initialize for Claude.ai
+      if (message.method === 'initialize') {
+        setTimeout(() => {
+          console.log('🔄 Auto-sending tools after initialize');
+          // This would normally be sent via SSE, but for HTTP we log it
+          console.log(`📧 Would send tools/list_changed notification with ${haTools.length} tools`);
+        }, 100);
+      }
+      
+    } catch (error) {
+      console.error('MCP request error:', error);
+      res.status(500).json({
+        jsonrpc: '2.0',
+        id: req.body?.id || null,
+        error: {
+          code: -32603,
+          message: 'Internal error',
+          data: error.message
+        }
+      });
+    }
+    return;
+  }
+  
+  res.status(405).json({ error: 'Method not allowed' });
+}
+
+// Claude.ai MCP endpoint with SSE support (Claude expects /sse)
+app.all('/sse', async (req, res) => {
+  return handleMCPEndpoint(req, res);
+});
+
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+  console.log('✅ HA MCP Server running on port', PORT);
+  console.log('🌐 Server URL:', SERVER_URL);
+  console.log('🔧 Mode: Express + MCP SDK');
+  console.log('📊 Health check:', `${SERVER_URL}/health`);
+});

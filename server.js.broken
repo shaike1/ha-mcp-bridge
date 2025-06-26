@@ -1,0 +1,220 @@
+const express = require('express');
+const crypto = require('crypto');
+const fs = require('fs');
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+const HA_URL = process.env.HOME_ASSISTANT_URL;
+const HA_TOKEN = process.env.HOME_ASSISTANT_TOKEN;
+const MCP_API_KEY = process.env.MCP_API_KEY;
+
+// OAuth storage
+const clients = new Map();
+const tokens = new Map();
+const codes = new Map();
+
+console.log('🏠 Home Assistant MCP Server v2');
+console.log('📡 HA_URL:', HA_URL);
+
+// Load OAuth data
+const OAUTH_DATA_FILE = '/tmp/oauth_data.json';
+function loadOAuthData() {
+    try {
+        if (fs.existsSync(OAUTH_DATA_FILE)) {
+            const data = JSON.parse(fs.readFileSync(OAUTH_DATA_FILE, 'utf8'));
+            if (data.clients) {
+                for (const [key, value] of Object.entries(data.clients)) {
+                    clients.set(key, value);
+                }
+            }
+            console.log('📂 Loaded OAuth data:', clients.size, 'clients');
+        }
+    } catch (error) {
+        console.log('⚠️ Could not load OAuth data');
+    }
+}
+
+function saveOAuthData() {
+    try {
+        const data = { clients: Object.fromEntries(clients) };
+        fs.writeFileSync(OAUTH_DATA_FILE, JSON.stringify(data));
+    } catch (error) {
+        console.log('⚠️ Could not save OAuth data');
+    }
+}
+
+loadOAuthData();
+
+// CORS and middleware
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') return res.status(200).end();
+    next();
+});
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Root handlers
+app.post('/', (req, res) => {
+    console.log('📡 POST /', req.body?.method || 'oauth');
+    
+    if (req.body.method === 'initialize') {
+        return res.json({
+            jsonrpc: "2.0",
+            id: req.body.id,
+            result: {
+                protocolVersion: "2024-11-05",
+                capabilities: { tools: {} },
+                serverInfo: { name: "Home Assistant MCP", version: "1.0.0" }
+            }
+        });
+    }
+    
+    if (req.body.method === 'notifications/initialized') {
+        return res.json({ jsonrpc: "2.0", result: null });
+    }
+    
+    if (req.body.method === 'tools/list') {
+        const tools = [
+            {
+                name: 'get_entities',
+                description: 'Get Home Assistant entities',
+                inputSchema: {
+                    type: 'object',
+                    properties: { domain: { type: 'string' } }
+                }
+            },
+            {
+                name: 'call_service',
+                description: 'Call Home Assistant service',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        domain: { type: 'string' },
+                        service: { type: 'string' },
+                        entity_id: { type: 'string' },
+                        data: { type: 'object' }
+                    },
+                    required: ['domain', 'service']
+                }
+            }
+        ];
+        return res.json({ jsonrpc: "2.0", id: req.body.id, result: { tools } });
+    }
+    
+    // OAuth registration
+    const clientId = crypto.randomUUID();
+    const clientSecret = crypto.randomBytes(32).toString('hex');
+    const client = {
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uris: req.body.redirect_uris || ['https://claude.ai/api/mcp/auth_callback'],
+        scope: 'homeassistant:read homeassistant:write',
+        grant_types: ['authorization_code'],
+        response_types: ['code'],
+        created_at: Date.now()
+    };
+    
+    clients.set(clientId, client);
+    saveOAuthData();
+    
+    res.json({
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uris: client.redirect_uris,
+        grant_types: client.grant_types,
+        response_types: client.response_types
+    });
+});
+
+app.get('/', (req, res) => {
+    res.json({
+        version: "2024-11-05",
+        name: "Home Assistant MCP",
+        description: "Control Home Assistant",
+        oauth: {
+            authorization_endpoint: "https://ha-mcp.right-api.com/oauth/authorize",
+            token_endpoint: "https://ha-mcp.right-api.com/oauth/token",
+            registration_endpoint: "https://ha-mcp.right-api.com/oauth/register"
+        }
+    });
+});
+
+// OAuth endpoints
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+    res.json({
+        issuer: "https://ha-mcp.right-api.com",
+        authorization_endpoint: "https://ha-mcp.right-api.com/oauth/authorize",
+        token_endpoint: "https://ha-mcp.right-api.com/oauth/token",
+        registration_endpoint: "https://ha-mcp.right-api.com/oauth/register",
+        scopes_supported: ["homeassistant:read", "homeassistant:write"],
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256", "plain"]
+    });
+});
+
+app.get('/oauth/authorize', (req, res) => {
+    const { client_id, redirect_uri, state, code_challenge, code_challenge_method } = req.query;
+    const client = clients.get(client_id);
+    
+    if (!client || !client.redirect_uris.includes(redirect_uri)) {
+        return res.status(400).send('Invalid client or redirect URI');
+    }
+    
+    const code = crypto.randomBytes(16).toString('hex');
+    codes.set(code, {
+        client_id, redirect_uri, expires: Date.now() + 600000,
+        code_challenge, code_challenge_method, used: false
+    });
+    
+    res.redirect(`${redirect_uri}?code=${code}&state=${state}`);
+});
+
+app.post('/oauth/token', (req, res) => {
+    const { code, client_id, code_verifier } = req.body;
+    const codeData = codes.get(code);
+    
+    if (!codeData || codeData.used || codeData.expires < Date.now()) {
+        return res.status(400).json({ error: 'invalid_grant' });
+    }
+    
+    if (codeData.code_challenge) {
+        let expected = code_verifier;
+        if (codeData.code_challenge_method === 'S256') {
+            expected = crypto.createHash('sha256').update(code_verifier).digest('base64url');
+        }
+        if (expected !== codeData.code_challenge) {
+            return res.status(400).json({ error: 'invalid_grant' });
+        }
+    }
+    
+    codeData.used = true;
+    const accessToken = crypto.randomBytes(32).toString('hex');
+    tokens.set(accessToken, { client_id, expires: Date.now() + 3600000 });
+    
+    res.json({
+        access_token: accessToken,
+        token_type: 'Bearer',
+        expires_in: 3600
+    });
+});
+
+app.get('/.well-known/mcp', (req, res) => {
+    res.json({
+        version: "2024-11-05",
+        name: "Home Assistant MCP",
+        oauth: {
+            authorization_endpoint: "https://ha-mcp.right-api.com/oauth/authorize",
+            token_endpoint: "https://ha-mcp.right-api.com/oauth/token",
+            registration_endpoint: "https://ha-mcp.right-api.com/oauth/register"
+        }
+    });
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+});

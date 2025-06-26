@@ -1,0 +1,822 @@
+#!/usr/bin/env node
+
+// Load environment variables
+try {
+    require('dotenv').config();
+} catch (error) {
+    console.log('⚠️  dotenv not found, using environment variables only');
+}
+
+const express = require('express');
+const crypto = require('crypto');
+const fs = require('fs').promises;
+const path = require('path');
+
+const app = express();
+
+// Configuration with fallbacks
+const PORT = process.env.PORT || 3001;
+const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+const DEBUG = process.env.DEBUG === 'true';
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+const MULTI_TENANT = process.env.MULTI_TENANT !== 'false'; // Default to true
+const ENABLE_USER_REGISTRATION = process.env.ENABLE_USER_REGISTRATION !== 'false'; // Default to true
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'admin-' + crypto.randomBytes(16).toString('hex');
+const MCP_API_KEY = process.env.MCP_API_KEY;
+
+// Paths
+const DATA_DIR = path.join(__dirname, 'data');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const PUBLIC_DIR = path.join(__dirname, 'public');
+
+// Enhanced logging with colors
+const colors = {
+    reset: '\x1b[0m',
+    red: '\x1b[31m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    blue: '\x1b[34m',
+    magenta: '\x1b[35m',
+    cyan: '\x1b[36m'
+};
+
+function log(level, message, data = null) {
+    const levels = { error: 0, warn: 1, info: 2, debug: 3 };
+    const currentLevel = levels[LOG_LEVEL] || 2;
+    
+    if (levels[level] <= currentLevel) {
+        const timestamp = new Date().toISOString();
+        const colorMap = {
+            error: colors.red,
+            warn: colors.yellow,
+            info: colors.blue,
+            debug: colors.cyan
+        };
+        
+        const color = colorMap[level] || colors.reset;
+        const logMessage = `${color}[${timestamp}] ${level.toUpperCase()}:${colors.reset} ${message}`;
+        
+        if (data) {
+            console.log(logMessage, typeof data === 'object' ? JSON.stringify(data, null, 2) : data);
+        } else {
+            console.log(logMessage);
+        }
+    }
+}
+
+// Initialize directories
+async function initializeDataDir() {
+    try {
+        await fs.access(DATA_DIR);
+        log('debug', 'Data directory exists');
+    } catch {
+        await fs.mkdir(DATA_DIR, { recursive: true });
+        log('info', 'Created data directory');
+    }
+    
+    try {
+        await fs.access(PUBLIC_DIR);
+        log('debug', 'Public directory exists');
+    } catch {
+        await fs.mkdir(PUBLIC_DIR, { recursive: true });
+        log('info', 'Created public directory');
+        
+        // Create a simple index.html if none exists
+        const indexHtml = `<!DOCTYPE html>
+<html>
+<head>
+    <title>HA MCP Bridge</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #2563eb; margin-bottom: 20px; }
+        .feature { margin: 15px 0; padding: 15px; background: #f8fafc; border-radius: 5px; }
+        .endpoints { background: #f0f9ff; padding: 20px; border-radius: 5px; margin: 20px 0; }
+        .endpoint { margin: 10px 0; font-family: monospace; background: white; padding: 10px; border-radius: 3px; }
+        .status { color: #16a34a; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏠 HA MCP Bridge</h1>
+        <p class="status">✅ Server is running!</p>
+        
+        <div class="feature">
+            <h3>🎛️ Multi-tenant Support</h3>
+            <p>Multiple users can connect their own Home Assistant instances</p>
+        </div>
+        
+        <div class="feature">
+            <h3>🔧 User Registration</h3>
+            <p>Register your Home Assistant instance to get an API key</p>
+        </div>
+        
+        <div class="feature">
+            <h3>🛡️ Secure API Keys</h3>
+            <p>Individual API keys for isolated access</p>
+        </div>
+        
+        <div class="endpoints">
+            <h3>📡 API Endpoints</h3>
+            <div class="endpoint">GET /health - Server health check</div>
+            <div class="endpoint">POST /register - User registration</div>
+            <div class="endpoint">POST / - MCP JSON-RPC endpoint</div>
+        </div>
+        
+        <p style="text-align: center; color: #6b7280; margin-top: 30px;">
+            <a href="https://github.com/yourusername/ha-mcp-bridge" style="color: #2563eb;">📚 Documentation</a>
+        </p>
+    </div>
+</body>
+</html>`;
+        
+        await fs.writeFile(path.join(PUBLIC_DIR, 'index.html'), indexHtml);
+        log('info', 'Created default index.html');
+    }
+}
+
+// User management class
+class UserManager {
+    constructor() {
+        this.users = new Map();
+        this.loadUsers();
+    }
+
+    async loadUsers() {
+        try {
+            const data = await fs.readFile(USERS_FILE, 'utf8');
+            const users = JSON.parse(data);
+            this.users = new Map(Object.entries(users));
+            log('info', `Loaded ${this.users.size} users`);
+        } catch (error) {
+            if (error.code !== 'ENOENT') {
+                log('error', 'Failed to load users', error.message);
+            } else {
+                log('info', 'No existing users file, starting fresh');
+            }
+            this.users = new Map();
+        }
+    }
+
+    async saveUsers() {
+        try {
+            const users = Object.fromEntries(this.users);
+            await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+            log('debug', 'Users saved to file');
+        } catch (error) {
+            log('error', 'Failed to save users', error.message);
+        }
+    }
+
+    generateApiKey() {
+        return crypto.randomBytes(32).toString('hex');
+    }
+
+    async createUser(email, haUrl, haToken) {
+        const apiKey = this.generateApiKey();
+        const user = {
+            id: crypto.randomUUID(),
+            email,
+            apiKey,
+            haUrl,
+            haToken,
+            createdAt: new Date().toISOString(),
+            lastUsed: null,
+            requestCount: 0,
+            monthlyRequests: 0
+        };
+
+        this.users.set(apiKey, user);
+        await this.saveUsers();
+        
+        log('info', 'User created', { 
+            email, 
+            haUrl: haUrl.replace(/\/\/.*@/, '//***@'), // Hide credentials in logs
+            apiKey: apiKey.substring(0, 8) + '...' 
+        });
+        return user;
+    }
+
+    getUser(apiKey) {
+        return this.users.get(apiKey);
+    }
+
+    async updateLastUsed(apiKey) {
+        const user = this.users.get(apiKey);
+        if (user) {
+            user.lastUsed = new Date().toISOString();
+            user.requestCount = (user.requestCount || 0) + 1;
+            user.monthlyRequests = (user.monthlyRequests || 0) + 1;
+            // Don't save on every request for performance - save periodically or on shutdown
+        }
+    }
+
+    async updateUser(apiKey, updates) {
+        const user = this.users.get(apiKey);
+        if (user) {
+            Object.assign(user, updates);
+            user.updatedAt = new Date().toISOString();
+            await this.saveUsers();
+            return user;
+        }
+        return null;
+    }
+
+    getAllUsers() {
+        return Array.from(this.users.values()).map(user => ({
+            id: user.id,
+            email: user.email,
+            createdAt: user.createdAt,
+            lastUsed: user.lastUsed,
+            requestCount: user.requestCount || 0,
+            haUrl: user.haUrl
+        }));
+    }
+
+    async deleteUser(apiKey) {
+        const deleted = this.users.delete(apiKey);
+        if (deleted) {
+            await this.saveUsers();
+            log('info', 'User deleted', { apiKey: apiKey.substring(0, 8) + '...' });
+        }
+        return deleted;
+    }
+}
+
+// Initialize user manager
+const userManager = new UserManager();
+
+// Startup logging
+log('info', '🚀 Starting HA MCP Bridge (Multi-tenant)');
+log('info', `🌐 SERVER_URL: ${SERVER_URL}`);
+log('info', `🔐 Multi-tenant: ${MULTI_TENANT}`);
+log('info', `📝 User registration: ${ENABLE_USER_REGISTRATION}`);
+log('info', `🔑 Admin key: ${ADMIN_API_KEY ? ADMIN_API_KEY.substring(0, 8) + '...' : 'not set'}`);
+log('info', `🔑 MCP key: ${MCP_API_KEY ? MCP_API_KEY.substring(0, 8) + '...' : 'not set'}`);
+
+// Express middleware
+app.use(express.json({ limit: '50mb' }));
+app.use(express.text({ type: 'application/jsonrpc' }));
+app.use(express.static(PUBLIC_DIR));
+
+// Enhanced CORS with better error handling
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD, PUT, PATCH, DELETE');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, X-API-Key, HA-URL, HA-Token');
+    res.setHeader('Access-Control-Max-Age', '86400');
+
+    if (req.method === 'OPTIONS') {
+        log('debug', 'CORS preflight handled');
+        res.status(200).end();
+        return;
+    }
+    next();
+});
+
+// Request logging
+app.use((req, res, next) => {
+    if (req.path !== '/health') { // Don't log health checks
+        log('debug', `${req.method} ${req.path}`, {
+            ip: req.ip || req.connection.remoteAddress,
+            userAgent: req.headers['user-agent']?.substring(0, 50)
+        });
+    }
+    next();
+});
+
+// Authentication middleware
+function authenticate(req, res, next) {
+    const authHeader = req.headers.authorization;
+    const apiKey = req.headers['x-api-key'] || req.query.api_key;
+    const token = authHeader?.replace('Bearer ', '');
+    const userApiKey = token || apiKey;
+
+    // Admin authentication
+    if (userApiKey === ADMIN_API_KEY) {
+        req.isAdmin = true;
+        log('debug', 'Admin authentication successful');
+        return next();
+    }
+
+    // Multi-tenant mode
+    if (MULTI_TENANT && userApiKey) {
+        const user = userManager.getUser(userApiKey);
+        if (user) {
+            req.user = user;
+            req.haConfig = {
+                url: user.haUrl,
+                token: user.haToken
+            };
+            userManager.updateLastUsed(userApiKey);
+            log('debug', 'User authentication successful', { email: user.email });
+            return next();
+        }
+    }
+
+    // Fallback authentication
+    const headerHaUrl = req.headers['ha-url'];
+    const headerHaToken = req.headers['ha-token'];
+    
+    if (headerHaUrl && headerHaToken) {
+        req.haConfig = {
+            url: headerHaUrl,
+            token: headerHaToken
+        };
+        log('debug', 'Header-based HA config authentication');
+        return next();
+    }
+
+    // Liberal authentication for MCP clients
+    if (req.headers['user-agent']?.includes('Claude') || 
+        req.headers['user-agent']?.includes('mcp-remote') ||
+        req.path === '/health' || 
+        req.path === '/' && req.method === 'GET') {
+        log('debug', 'Client authentication successful');
+        return next();
+    }
+
+    log('warn', 'Authentication failed', {
+        hasAuthHeader: !!authHeader,
+        hasApiKey: !!apiKey,
+        userAgent: req.headers['user-agent']?.substring(0, 30),
+        path: req.path
+    });
+    
+    return res.status(401).json({ 
+        error: 'Unauthorized. Please provide a valid API key.',
+        endpoints: {
+            register: ENABLE_USER_REGISTRATION ? '/register' : 'disabled',
+            health: '/health'
+        }
+    });
+}
+
+// Home Assistant API functions with better error handling
+async function callHomeAssistant(endpoint, method = 'GET', data = null, config = null) {
+    if (!config?.url || !config?.token) {
+        throw new Error('Home Assistant configuration required. Please provide HA URL and token.');
+    }
+
+    const url = `${config.url}${endpoint}`;
+    const options = {
+        method,
+        headers: {
+            'Authorization': `Bearer ${config.token}`,
+            'Content-Type': 'application/json',
+        }
+    };
+
+    if (data && method !== 'GET') {
+        options.body = JSON.stringify(data);
+    }
+
+    log('debug', `HA API call: ${method} ${endpoint}`);
+    
+    try {
+        const response = await fetch(url, options);
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`HA API error: ${response.status} ${response.statusText}${errorText ? ' - ' + errorText : ''}`);
+        }
+
+        return await response.json();
+    } catch (error) {
+        if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
+            throw new Error('Cannot connect to Home Assistant. Please check the URL and ensure HA is running.');
+        }
+        log('error', 'HA API call failed', error.message);
+        throw error;
+    }
+}
+
+// Routes
+
+// Landing page with better info
+app.get('/', (req, res) => {
+    const isAdmin = req.headers.authorization === `Bearer ${ADMIN_API_KEY}`;
+    
+    res.json({
+        name: 'HA MCP Bridge',
+        version: '2.0.0',
+        description: 'Multi-tenant Home Assistant MCP Bridge for Claude',
+        status: 'running',
+        features: {
+            multiTenant: MULTI_TENANT,
+            userRegistration: ENABLE_USER_REGISTRATION,
+            adminInterface: isAdmin
+        },
+        endpoints: {
+            health: '/health',
+            register: ENABLE_USER_REGISTRATION ? '/register' : 'disabled',
+            mcp: 'POST /',
+            admin: isAdmin ? '/admin/users' : 'admin access required'
+        },
+        statistics: {
+            totalUsers: userManager.users.size,
+            registrationEnabled: ENABLE_USER_REGISTRATION
+        },
+        serverInfo: {
+            serverUrl: SERVER_URL,
+            nodeVersion: process.version,
+            uptime: process.uptime()
+        },
+        documentation: {
+            github: 'https://github.com/yourusername/ha-mcp-bridge'
+        }
+    });
+});
+
+// Health check with more details
+app.get('/health', (req, res) => {
+    const health = {
+        status: 'ok',
+        version: '2.0.0',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        server: {
+            url: SERVER_URL,
+            multiTenant: MULTI_TENANT,
+            userRegistration: ENABLE_USER_REGISTRATION
+        },
+        statistics: {
+            totalUsers: userManager.users.size,
+            totalRequests: Array.from(userManager.users.values())
+                .reduce((sum, user) => sum + (user.requestCount || 0), 0)
+        },
+        features: {
+            adminInterface: !!ADMIN_API_KEY,
+            healthChecks: true
+        },
+        tools: ['get_entities', 'call_service', 'get_automations', 'get_lights', 'get_switches']
+    };
+
+    res.json(health);
+});
+
+// User registration
+app.post('/register', async (req, res) => {
+    if (!ENABLE_USER_REGISTRATION) {
+        return res.status(403).json({ 
+            error: 'User registration is currently disabled',
+            contact: 'Please contact the administrator for access'
+        });
+    }
+
+    const { email, haUrl, haToken } = req.body;
+
+    if (!email || !haUrl || !haToken) {
+        return res.status(400).json({ 
+            error: 'Missing required fields',
+            required: ['email', 'haUrl', 'haToken'],
+            example: {
+                email: 'user@example.com',
+                haUrl: 'http://homeassistant.local:8123',
+                haToken: 'your_long_lived_access_token'
+            }
+        });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+        return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    // Validate URL format
+    try {
+        new URL(haUrl);
+    } catch {
+        return res.status(400).json({ error: 'Invalid Home Assistant URL format' });
+    }
+
+    try {
+        // Test HA connection
+        log('info', 'Testing HA connection for registration', { email, haUrl: haUrl.replace(/\/\/.*@/, '//***@') });
+        await callHomeAssistant('/api/', 'GET', null, { url: haUrl, token: haToken });
+        
+        const user = await userManager.createUser(email, haUrl, haToken);
+        
+        res.json({
+            success: true,
+            apiKey: user.apiKey,
+            message: 'Registration successful! Save your API key securely - you won\'t see it again.',
+            nextSteps: {
+                claudeConfig: {
+                    mcpServers: {
+                        homeassistant: {
+                            command: "npx",
+                            args: ["mcp-remote", SERVER_URL],
+                            env: {
+                                MCP_API_KEY: user.apiKey
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    } catch (error) {
+        log('error', 'Registration failed', { email, error: error.message });
+        res.status(400).json({ 
+            error: 'Failed to connect to Home Assistant',
+            details: error.message,
+            troubleshooting: [
+                'Verify your Home Assistant URL is correct and accessible',
+                'Ensure your long-lived access token is valid',
+                'Check that Home Assistant is running and reachable'
+            ]
+        });
+    }
+});
+
+// JSON-RPC message handler with better error handling
+async function handleJsonRpcMessage(body, haConfig = null, user = null) {
+    const { method, params, id } = body;
+    
+    log('debug', `Handling JSON-RPC method: ${method}`, user ? { userId: user.id } : null);
+    
+    let result;
+
+    switch (method) {
+        case 'initialize':
+            result = {
+                protocolVersion: "2024-11-05",
+                capabilities: { tools: {}, resources: {}, prompts: {} },
+                serverInfo: {
+                    name: "HA MCP Bridge (Multi-tenant)",
+                    version: "2.0.0",
+                    userMode: !!user,
+                    features: ['multi-tenant', 'real-time-config']
+                }
+            };
+            log('info', 'MCP client initialized', user ? { email: user.email } : { mode: 'anonymous' });
+            break;
+
+        case 'tools/list':
+            result = {
+                tools: [
+                    {
+                        name: 'get_entities',
+                        description: 'Get all Home Assistant entities or filter by domain',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                domain: { type: 'string', description: 'Filter by domain (light, switch, sensor, etc.)' }
+                            }
+                        }
+                    },
+                    {
+                        name: 'call_service',
+                        description: 'Call a Home Assistant service to control devices',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                domain: { type: 'string', description: 'Service domain' },
+                                service: { type: 'string', description: 'Service name' },
+                                entity_id: { type: 'string', description: 'Target entity ID' },
+                                data: { type: 'object', description: 'Additional service data' }
+                            },
+                            required: ['domain', 'service']
+                        }
+                    },
+                    {
+                        name: 'get_automations',
+                        description: 'Get all Home Assistant automations',
+                        inputSchema: { type: 'object', properties: {} }
+                    },
+                    {
+                        name: 'get_lights',
+                        description: 'Get all light entities',
+                        inputSchema: { type: 'object', properties: {} }
+                    },
+                    {
+                        name: 'get_switches',
+                        description: 'Get all switch entities',
+                        inputSchema: { type: 'object', properties: {} }
+                    }
+                ]
+            };
+            break;
+
+        case 'prompts/list':
+            result = { prompts: [] };
+            break;
+
+        case 'resources/list':
+            result = { resources: [] };
+            break;
+
+        case 'tools/call':
+            if (!haConfig) {
+                throw new Error('Home Assistant configuration required for tool calls. Please register at /register or provide HA-URL and HA-Token headers.');
+            }
+
+            const { name, arguments: args } = params;
+            log('info', `Tool called: ${name}`, { args, userId: user?.id });
+
+            try {
+                let toolResult;
+                const entities = await callHomeAssistant('/api/states', 'GET', null, haConfig);
+
+                switch (name) {
+                    case 'get_entities':
+                        toolResult = args?.domain ? 
+                            entities.filter(e => e.entity_id.startsWith(args.domain + '.')) : 
+                            entities;
+                        break;
+                    case 'call_service':
+                        const serviceData = { ...args.data };
+                        if (args.entity_id) serviceData.entity_id = args.entity_id;
+                        toolResult = await callHomeAssistant(`/api/services/${args.domain}/${args.service}`, 'POST', serviceData, haConfig);
+                        break;
+                    case 'get_automations':
+                        toolResult = entities.filter(e => e.entity_id.startsWith('automation.'));
+                        break;
+                    case 'get_lights':
+                        toolResult = entities.filter(e => e.entity_id.startsWith('light.'));
+                        break;
+                    case 'get_switches':
+                        toolResult = entities.filter(e => e.entity_id.startsWith('switch.'));
+                        break;
+                    default:
+                        throw new Error(`Unknown tool: ${name}`);
+                }
+
+                result = {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify(toolResult, null, 2)
+                        }
+                    ]
+                };
+
+            } catch (error) {
+                log('error', 'Tool execution error', { tool: name, error: error.message, userId: user?.id });
+                result = {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Error executing ${name}: ${error.message}`
+                        }
+                    ]
+                };
+            }
+            break;
+
+        case 'notifications/initialized':
+            log('info', 'Client initialized notification received');
+            return {};
+
+        default:
+            throw new Error(`Unknown JSON-RPC method: ${method}`);
+    }
+
+    return { jsonrpc: "2.0", id, result };
+}
+
+// Main JSON-RPC endpoint
+app.post('/', authenticate, async (req, res) => {
+    try {
+        const response = await handleJsonRpcMessage(req.body, req.haConfig, req.user);
+        res.json(response);
+    } catch (error) {
+        log('error', 'JSON-RPC error', { error: error.message, method: req.body?.method });
+        res.json({
+            jsonrpc: "2.0",
+            id: req.body?.id,
+            error: { 
+                code: -32603, 
+                message: error.message,
+                data: {
+                    timestamp: new Date().toISOString(),
+                    method: req.body?.method
+                }
+            }
+        });
+    }
+});
+
+// Admin endpoints
+app.get('/admin/users', authenticate, (req, res) => {
+    if (!req.isAdmin) {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const users = userManager.getAllUsers();
+    const stats = {
+        totalUsers: users.length,
+        totalRequests: users.reduce((sum, user) => sum + (user.requestCount || 0), 0),
+        activeUsers: users.filter(user => user.lastUsed).length,
+        newUsersToday: users.filter(user => {
+            const today = new Date().toDateString();
+            return new Date(user.createdAt).toDateString() === today;
+        }).length
+    };
+
+    res.json({
+        users,
+        statistics: stats
+    });
+});
+
+app.delete('/admin/users/:apiKey', authenticate, async (req, res) => {
+    if (!req.isAdmin) {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const deleted = await userManager.deleteUser(req.params.apiKey);
+    res.json({ 
+        success: deleted,
+        message: deleted ? 'User deleted successfully' : 'User not found'
+    });
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+    log('error', 'Unhandled error', { error: err.message, stack: err.stack });
+    res.status(500).json({ 
+        error: 'Internal server error',
+        message: 'An unexpected error occurred',
+        timestamp: new Date().toISOString()
+    });
+});
+
+// 404 handler
+app.use((req, res) => {
+    res.status(404).json({
+        error: 'Not found',
+        message: `Endpoint ${req.method} ${req.path} not found`,
+        availableEndpoints: {
+            GET: ['/', '/health'],
+            POST: ['/', '/register']
+        }
+    });
+});
+
+// Graceful shutdown handling
+process.on('SIGTERM', async () => {
+    log('info', 'SIGTERM received, saving user data...');
+    await userManager.saveUsers();
+    process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+    log('info', 'SIGINT received, saving user data...');
+    await userManager.saveUsers();
+    process.exit(0);
+});
+
+// Periodic user data saving (every 5 minutes)
+setInterval(async () => {
+    try {
+        await userManager.saveUsers();
+        log('debug', 'Periodic user data save completed');
+    } catch (error) {
+        log('error', 'Periodic save failed', error.message);
+    }
+}, 5 * 60 * 1000);
+
+// Initialize and start server
+async function startServer() {
+    try {
+        await initializeDataDir();
+        
+        const server = app.listen(PORT, '0.0.0.0', () => {
+            log('info', `${colors.green}✅ HA MCP Bridge Server running on port ${PORT}${colors.reset}`);
+            log('info', `🌐 Server URL: ${SERVER_URL}`);
+            log('info', `📊 Health check: ${SERVER_URL}/health`);
+            log('info', `🔧 Mode: ${MULTI_TENANT ? 'Multi-tenant' : 'Single-tenant'}`);
+            log('info', `📝 Registration: ${ENABLE_USER_REGISTRATION ? 'Enabled' : 'Disabled'}`);
+            log('info', `👥 Users: ${userManager.users.size}`);
+            log('info', `🔑 Admin API: ${ADMIN_API_KEY ? 'Configured' : 'Not set'}`);
+            
+            if (ENABLE_USER_REGISTRATION) {
+                log('info', `${colors.cyan}🚀 Users can register at: ${SERVER_URL}/register${colors.reset}`);
+            }
+            
+            if (!ADMIN_API_KEY || ADMIN_API_KEY.startsWith('admin-')) {
+                log('warn', `⚠️  Using auto-generated admin key: ${ADMIN_API_KEY}`);
+                log('warn', `   Set ADMIN_API_KEY environment variable for production`);
+            }
+        });
+
+        // Handle server errors
+        server.on('error', (error) => {
+            if (error.code === 'EADDRINUSE') {
+                log('error', `Port ${PORT} is already in use`);
+                process.exit(1);
+            } else {
+                log('error', 'Server error', error);
+            }
+        });
+
+    } catch (error) {
+        log('error', 'Failed to start server', error);
+        process.exit(1);
+    }
+}
+
+// Start the server
+startServer();

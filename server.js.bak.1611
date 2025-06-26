@@ -1,0 +1,421 @@
+const express = require('express');
+const crypto = require('crypto');
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+const HA_URL = process.env.HOME_ASSISTANT_URL;
+const HA_TOKEN = process.env.HOME_ASSISTANT_TOKEN;
+const MCP_API_KEY = process.env.MCP_API_KEY;
+
+const clients = new Map();
+const tokens = new Map();
+const codes = new Map();
+
+console.log('🏠 Home Assistant MCP Server - Claude.ai Compatible');
+
+app.use((req, res, next) => {
+    console.log(`📥 ${req.method} ${req.path}`);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') return res.status(200).end();
+    next();
+});
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+function base64URLEncode(str) {
+    return str.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+function sha256(buffer) {
+    return crypto.createHash('sha256').update(buffer).digest();
+}
+
+function authenticateBearer(req, res, next) {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.replace('Bearer ', '');
+    
+    if (token === MCP_API_KEY || tokens.has(token)) {
+        req.authType = token === MCP_API_KEY ? 'bearer' : 'oauth';
+        req.tokenData = tokens.get(token);
+        return next();
+    }
+    
+    return res.status(401).json({ error: 'Authentication required' });
+}
+
+const MCP_TOOLS = [
+    {
+        name: 'get_entities',
+        description: 'Get Home Assistant entities (lights, switches, sensors)',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                domain: { 
+                    type: 'string', 
+                    description: 'Entity domain filter (e.g., light, switch, sensor)' 
+                }
+            },
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'call_service',
+        description: 'Control Home Assistant devices',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                domain: { 
+                    type: 'string', 
+                    description: 'Service domain (e.g., light, switch)' 
+                },
+                service: { 
+                    type: 'string', 
+                    description: 'Service name (e.g., turn_on, turn_off)' 
+                },
+                entity_id: { 
+                    type: 'string', 
+                    description: 'Target entity ID (e.g., light.living_room)' 
+                },
+                data: { 
+                    type: 'object', 
+                    description: 'Additional service data (brightness, color, etc.)' 
+                }
+            },
+            required: ['domain', 'service'],
+            additionalProperties: false
+        }
+    }
+];
+
+async function handleMCPRequest(req, res) {
+    const { method, params, id } = req.body;
+    console.log(`🔧 MCP Method: ${method}`, params ? `with params: ${JSON.stringify(params)}` : '');
+    
+    try {
+        let result = null;
+        
+        switch (method) {
+            case 'initialize':
+                // Ensure we handle client capabilities properly
+                const clientCapabilities = params?.capabilities || {};
+                result = {
+                    protocolVersion: "2024-11-05",
+                    capabilities: {
+                        tools: { 
+                            listChanged: true 
+                        },
+                        resources: {},
+                        prompts: {},
+                        logging: {}
+                    },
+                    serverInfo: {
+                        name: "Home Assistant MCP",
+                        version: "1.0.0"
+                    }
+                };
+                console.log('✅ MCP initialized with capabilities:', clientCapabilities);
+                break;
+                
+            case 'notifications/initialized':
+                // This should always return an empty result
+                result = {};
+                console.log('✅ Claude.ai initialization notification received');
+                break;
+                
+            case 'tools/list':
+                result = { 
+                    tools: MCP_TOOLS 
+                };
+                console.log(`✅ Tools listed: ${MCP_TOOLS.length} tools available`);
+                MCP_TOOLS.forEach(tool => {
+                    console.log(`   - ${tool.name}: ${tool.description}`);
+                });
+                break;
+                
+            case 'tools/call':
+                const { name, arguments: args } = params;
+                console.log(`🔧 Tool call: ${name} with args:`, args);
+                
+                if (name === 'get_entities') {
+                    result = { content: [{ type: "text", text: await getEntities(args?.domain) }] };
+                } else if (name === 'call_service') {
+                    result = { content: [{ type: "text", text: await callService(args.domain, args.service, args.entity_id, args.data) }] };
+                } else {
+                    throw new Error(`Unknown tool: ${name}`);
+                }
+                break;
+                
+            case 'resources/list':
+                result = { resources: [] };
+                console.log('✅ Resources listed (empty)');
+                break;
+                
+            case 'prompts/list':
+                result = { prompts: [] };
+                console.log('✅ Prompts listed (empty)');
+                break;
+                
+            default:
+                console.log(`❓ Unknown method: ${method} - returning empty result`);
+                result = {};
+        }
+        
+        const response = { jsonrpc: "2.0", id: id, result: result };
+        console.log(`📤 Sending response for ${method}:`, JSON.stringify(response, null, 2));
+        res.json(response);
+        
+    } catch (error) {
+        console.error(`❌ MCP Error in ${method}:`, error.message);
+        const errorResponse = {
+            jsonrpc: "2.0",
+            id: id,
+            error: { 
+                code: -32603, 
+                message: error.message,
+                data: { method: method }
+            }
+        };
+        console.log(`📤 Sending error response:`, JSON.stringify(errorResponse, null, 2));
+        res.json(errorResponse);
+    }
+}
+
+// MCP Discovery - Enhanced for Claude.ai compatibility
+app.get('/.well-known/mcp', (req, res) => {
+    console.log('🔍 MCP Discovery endpoint called');
+    const discoveryResponse = {
+        version: "2024-11-05",
+        name: "Home Assistant MCP",
+        description: "Control Home Assistant devices through natural language",
+        tools: MCP_TOOLS,
+        resources: [],
+        prompts: [],
+        oauth: {
+            authorization_endpoint: "https://ha-mcp.right-api.com/oauth/authorize",
+            token_endpoint: "https://ha-mcp.right-api.com/token",
+            registration_endpoint: "https://ha-mcp.right-api.com/oauth/register",
+            scopes_supported: ["homeassistant:read", "homeassistant:write"],
+            response_types_supported: ["code"],
+            grant_types_supported: ["authorization_code"],
+            code_challenge_methods_supported: ["S256", "plain"]
+        }
+    };
+    
+    console.log('📤 Discovery response:', JSON.stringify(discoveryResponse, null, 2));
+    res.json(discoveryResponse);
+});
+
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+    res.json({
+        issuer: "https://ha-mcp.right-api.com",
+        authorization_endpoint: "https://ha-mcp.right-api.com/oauth/authorize",
+        token_endpoint: "https://ha-mcp.right-api.com/token",
+        registration_endpoint: "https://ha-mcp.right-api.com/oauth/register",
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256", "plain"]
+    });
+});
+
+app.post('/oauth/register', (req, res) => {
+    const { redirect_uris, client_name } = req.body;
+    const clientId = crypto.randomUUID();
+    const client = {
+        client_id: clientId,
+        client_secret: crypto.randomBytes(32).toString('hex'),
+        redirect_uris: redirect_uris || ['https://claude.ai/api/mcp/auth_callback'],
+        client_name: client_name || 'Claude MCP Client'
+    };
+    clients.set(clientId, client);
+    console.log('✅ OAuth client registered:', clientId);
+    res.json(client);
+});
+
+app.get('/authorize', (req, res) => {
+    const query = new URLSearchParams(req.query).toString();
+    res.redirect(301, `/oauth/authorize?${query}`);
+});
+
+app.get('/oauth/authorize', (req, res) => {
+    const { client_id, redirect_uri, scope, state, code_challenge, code_challenge_method } = req.query;
+    
+    console.log('🔐 OAuth authorize request:', { client_id, redirect_uri, scope, state });
+    
+    // Auto-register client if not exists (for Claude.ai compatibility)
+    if (!clients.has(client_id)) {
+        const newClient = {
+            client_id,
+            client_secret: crypto.randomBytes(32).toString('hex'),
+            redirect_uris: [redirect_uri]
+        };
+        clients.set(client_id, newClient);
+        console.log('✅ Auto-registered OAuth client:', client_id);
+    }
+    
+    const code = crypto.randomBytes(16).toString('hex');
+    codes.set(code, {
+        client_id, 
+        scope: scope || 'homeassistant:read homeassistant:write', 
+        redirect_uri, 
+        code_challenge, 
+        code_challenge_method,
+        expires: Date.now() + 600000, 
+        used: false
+    });
+    
+    console.log('✅ OAuth authorization code generated');
+    const redirectUrl = `${redirect_uri}?code=${code}&state=${state || ''}`;
+    console.log('🔄 Redirecting to:', redirectUrl);
+    res.redirect(redirectUrl);
+});
+
+function handleTokenRequest(req, res) {
+    const { grant_type, code, client_id, code_verifier } = req.body;
+    console.log('🎫 Token request:', { grant_type, code, client_id });
+    
+    if (grant_type !== 'authorization_code') {
+        console.log('❌ Unsupported grant type:', grant_type);
+        return res.status(400).json({ error: 'unsupported_grant_type' });
+    }
+    
+    const codeData = codes.get(code);
+    if (!codeData || codeData.used || codeData.expires < Date.now()) {
+        console.log('❌ Invalid or expired authorization code');
+        return res.status(400).json({ error: 'invalid_grant' });
+    }
+    
+    // Verify PKCE if provided
+    if (codeData.code_challenge && code_verifier) {
+        const challengeFromVerifier = base64URLEncode(sha256(code_verifier));
+        if (challengeFromVerifier !== codeData.code_challenge) {
+            console.log('❌ PKCE verification failed');
+            return res.status(400).json({ error: 'invalid_grant' });
+        }
+        console.log('✅ PKCE verification passed');
+    }
+    
+    codeData.used = true;
+    const accessToken = crypto.randomBytes(32).toString('hex');
+    const tokenData = {
+        client_id: codeData.client_id, 
+        scope: codeData.scope,
+        expires: Date.now() + 3600000
+    };
+    tokens.set(accessToken, tokenData);
+    
+    codes.delete(code);
+    console.log('🎉 OAuth access token generated');
+    
+    const tokenResponse = {
+        access_token: accessToken,
+        token_type: 'Bearer',
+        expires_in: 3600,
+        scope: codeData.scope
+    };
+    
+    console.log('📤 Token response:', tokenResponse);
+    res.json(tokenResponse);
+}
+
+app.post('/token', handleTokenRequest);
+app.post('/oauth/token', handleTokenRequest);
+
+// Main MCP endpoints
+app.get('/', (req, res) => res.redirect('/.well-known/mcp'));
+app.post('/', authenticateBearer, handleMCPRequest);
+app.post('/rpc', authenticateBearer, handleMCPRequest);
+
+async function getEntities(domain = null) {
+    try {
+        const url = `${HA_URL}/api/states`;
+        const response = await fetch(url, {
+            headers: {
+                'Authorization': `Bearer ${HA_TOKEN}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Home Assistant API error: ${response.status} ${response.statusText}`);
+        }
+        
+        const entities = await response.json();
+        const filtered = domain ? entities.filter(e => e.entity_id.startsWith(domain + '.')) : entities;
+        
+        console.log(`📊 Retrieved ${filtered.length} entities${domain ? ` for domain: ${domain}` : ''}`);
+        
+        // Format entities for display
+        const entityList = filtered.map(entity => ({
+            entity_id: entity.entity_id,
+            state: entity.state,
+            friendly_name: entity.attributes?.friendly_name || entity.entity_id,
+            domain: entity.entity_id.split('.')[0]
+        }));
+        
+        return JSON.stringify({
+            success: true,
+            count: entityList.length,
+            entities: entityList.slice(0, 50) // Limit to first 50 for readability
+        }, null, 2);
+        
+    } catch (error) {
+        console.error('❌ Get entities failed:', error.message);
+        return JSON.stringify({
+            success: false,
+            error: error.message
+        }, null, 2);
+    }
+}
+
+async function callService(domain, service, entity_id, data = {}) {
+    try {
+        const url = `${HA_URL}/api/services/${domain}/${service}`;
+        const body = { ...data };
+        if (entity_id) body.entity_id = entity_id;
+        
+        console.log(`🎯 Calling service: ${domain}.${service}`, body);
+        
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${HA_TOKEN}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(body)
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Service call failed: ${response.status} ${response.statusText}`);
+        }
+        
+        const result = await response.json();
+        console.log(`✅ Service called successfully: ${domain}.${service}`);
+        
+        return JSON.stringify({
+            success: true,
+            service: `${domain}.${service}`,
+            entity_id: entity_id,
+            result: result
+        }, null, 2);
+        
+    } catch (error) {
+        console.error('❌ Service call failed:', error.message);
+        return JSON.stringify({
+            success: false,
+            error: error.message,
+            service: `${domain}.${service}`,
+            entity_id: entity_id
+        }, null, 2);
+    }
+}
+
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Home Assistant MCP Server running on port ${PORT}`);
+    console.log(`📍 Server URL: http://localhost:${PORT}`);
+    console.log(`🔍 Discovery URL: /.well-known/mcp`);
+    console.log(`🛠️  Available tools: ${MCP_TOOLS.map(t => t.name).join(', ')}`);
+    console.log(`🏠 Home Assistant: ${HA_URL}`);
+    console.log(`🔐 OAuth endpoints configured`);
+});

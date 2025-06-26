@@ -1,0 +1,502 @@
+#!/usr/bin/env node
+
+// Load environment variables
+require('dotenv').config();
+
+const express = require('express');
+const crypto = require('crypto');
+const fs = require('fs').promises;
+const path = require('path');
+const jwt = require('jsonwebtoken');
+const cors = require('cors');
+const helmet = require('helmet');
+const NodeCache = require('node-cache');
+
+// Import MCP handlers
+const { handleJsonRpcMessage, callHomeAssistant } = require('./mcp-handlers');
+
+const app = express();
+
+// Configuration with fallbacks
+const PORT = process.env.PORT || 3001;
+const SERVER_URL = process.env.SERVER_URL || `https://ha-mcp-web.right-api.com`;
+const DEBUG = process.env.DEBUG === 'true';
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+const MULTI_TENANT = process.env.MULTI_TENANT !== 'false';
+const ENABLE_USER_REGISTRATION = process.env.ENABLE_USER_REGISTRATION !== 'false';
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'admin-' + crypto.randomBytes(16).toString('hex');
+const MCP_API_KEY = process.env.MCP_API_KEY;
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+
+// Paths
+const DATA_DIR = path.join(__dirname, 'data');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const OAUTH_CLIENTS_FILE = path.join(DATA_DIR, 'oauth-clients.json');
+const PUBLIC_DIR = path.join(__dirname, 'public');
+
+// Initialize token cache
+const tokenCache = new NodeCache({ stdTTL: 3600 }); // 1 hour TTL
+
+// Enhanced logging with colors
+const colors = {
+    reset: '\x1b[0m',
+    red: '\x1b[31m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    blue: '\x1b[34m',
+    magenta: '\x1b[35m',
+    cyan: '\x1b[36m'
+};
+
+function log(level, message, data = null) {
+    const levels = { error: 0, warn: 1, info: 2, debug: 3 };
+    const currentLevel = levels[LOG_LEVEL] || 2;
+    
+    if (levels[level] <= currentLevel) {
+        const timestamp = new Date().toISOString();
+        const colorMap = {
+            error: colors.red,
+            warn: colors.yellow,
+            info: colors.blue,
+            debug: colors.cyan
+        };
+        
+        const color = colorMap[level] || colors.reset;
+        const logMessage = `${color}[${timestamp}] ${level.toUpperCase()}:${colors.reset} ${message}`;
+        
+        if (data) {
+            console.log(logMessage, typeof data === 'object' ? JSON.stringify(data, null, 2) : data);
+        } else {
+            console.log(logMessage);
+        }
+    }
+}
+
+// Initialize directories and files
+async function initializeDataDir() {
+    try {
+        await fs.access(DATA_DIR);
+        log('debug', 'Data directory exists');
+    } catch {
+        await fs.mkdir(DATA_DIR, { recursive: true });
+        log('info', 'Created data directory');
+    }
+    
+    try {
+        await fs.access(PUBLIC_DIR);
+        log('debug', 'Public directory exists');
+    } catch {
+        await fs.mkdir(PUBLIC_DIR, { recursive: true });
+        log('info', 'Created public directory');
+    }
+
+    // Initialize OAuth clients file if it doesn't exist
+    try {
+        await fs.access(OAUTH_CLIENTS_FILE);
+    } catch {
+        await fs.writeFile(OAUTH_CLIENTS_FILE, JSON.stringify({}, null, 2));
+        log('info', 'Created OAuth clients file');
+    }
+}
+
+// OAuth Client Management
+class OAuthClientManager {
+    constructor() {
+        this.clients = new Map();
+        this.loadClients();
+    }
+
+    async loadClients() {
+        try {
+            const data = await fs.readFile(OAUTH_CLIENTS_FILE, 'utf8');
+            const clients = JSON.parse(data);
+            this.clients = new Map(Object.entries(clients));
+            log('info', `Loaded ${this.clients.size} OAuth clients`);
+        } catch (error) {
+            if (error.code !== 'ENOENT') {
+                log('error', 'Failed to load OAuth clients', error.message);
+            } else {
+                log('info', 'No existing OAuth clients file, starting fresh');
+            }
+            this.clients = new Map();
+        }
+    }
+
+    async saveClients() {
+        try {
+            const clients = Object.fromEntries(this.clients);
+            await fs.writeFile(OAUTH_CLIENTS_FILE, JSON.stringify(clients, null, 2));
+            log('debug', 'OAuth clients saved to file');
+        } catch (error) {
+            log('error', 'Failed to save OAuth clients', error.message);
+        }
+    }
+
+    generateClientId() {
+        return 'client_' + crypto.randomBytes(16).toString('hex');
+    }
+
+    generateClientSecret() {
+        return crypto.randomBytes(32).toString('hex');
+    }
+
+    async registerClient(clientName, redirectUris) {
+        const clientId = this.generateClientId();
+        const clientSecret = this.generateClientSecret();
+        
+        const client = {
+            clientId,
+            clientSecret,
+            clientName,
+            redirectUris,
+            createdAt: new Date().toISOString(),
+            lastUsed: null,
+            requestCount: 0
+        };
+
+        this.clients.set(clientId, client);
+        await this.saveClients();
+        
+        log('info', 'OAuth client registered', { 
+            clientName,
+            clientId,
+            redirectUris
+        });
+        
+        return client;
+    }
+
+    getClient(clientId) {
+        return this.clients.get(clientId);
+    }
+
+    async updateClientLastUsed(clientId) {
+        const client = this.clients.get(clientId);
+        if (client) {
+            client.lastUsed = new Date().toISOString();
+            client.requestCount++;
+            await this.saveClients();
+        }
+    }
+}
+
+// Initialize managers
+const oauthClientManager = new OAuthClientManager();
+
+// Middleware
+app.use(helmet());
+app.use(cors());
+app.use(express.json());
+
+// Serve static files from the public directory
+app.use(express.static(path.join(__dirname, 'public')));
+
+// OAuth Authorization Server Metadata (RFC 8414)
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+    log('debug', 'OAuth Authorization Server Metadata requested');
+    res.json({
+        issuer: SERVER_URL,
+        authorization_endpoint: `${SERVER_URL}/oauth/authorize`,
+        token_endpoint: `${SERVER_URL}/oauth/token`,
+        registration_endpoint: `${SERVER_URL}/oauth/register`,
+        scopes_supported: ['mcp', 'read', 'write'],
+        response_types_supported: ['code'],
+        grant_types_supported: ['authorization_code', 'refresh_token'],
+        token_endpoint_auth_methods_supported: ['client_secret_basic'],
+        revocation_endpoint: `${SERVER_URL}/oauth/revoke`,
+        introspection_endpoint: `${SERVER_URL}/oauth/introspect`
+    });
+});
+
+// OAuth Client Registration
+app.post('/oauth/register', async (req, res) => {
+    const { client_name, redirect_uris } = req.body;
+    
+    if (!client_name || !redirect_uris || !Array.isArray(redirect_uris)) {
+        return res.status(400).json({
+            error: 'invalid_request',
+            error_description: 'client_name and redirect_uris are required'
+        });
+    }
+
+    try {
+        const client = await oauthClientManager.registerClient(client_name, redirect_uris);
+        res.json({
+            client_id: client.clientId,
+            client_secret: client.clientSecret,
+            client_id_issued_at: Math.floor(Date.now() / 1000),
+            client_secret_expires_at: 0,
+            redirect_uris: client.redirectUris
+        });
+    } catch (error) {
+        log('error', 'Failed to register OAuth client', error);
+        res.status(500).json({
+            error: 'server_error',
+            error_description: 'Failed to register client'
+        });
+    }
+});
+
+// OAuth Authorization Endpoint
+app.get('/oauth/authorize', async (req, res) => {
+    const { client_id, redirect_uri, response_type, scope, state } = req.query;
+    
+    if (!client_id || !redirect_uri || response_type !== 'code') {
+        return res.status(400).json({
+            error: 'invalid_request',
+            error_description: 'Missing required parameters'
+        });
+    }
+
+    const client = oauthClientManager.getClient(client_id);
+    if (!client) {
+        return res.status(400).json({
+            error: 'invalid_client',
+            error_description: 'Client not found'
+        });
+    }
+
+    if (!client.redirectUris.includes(redirect_uri)) {
+        return res.status(400).json({
+            error: 'invalid_request',
+            error_description: 'Invalid redirect URI'
+        });
+    }
+
+    // Generate authorization code
+    const code = crypto.randomBytes(32).toString('hex');
+    const codeData = {
+        client_id,
+        scope,
+        redirect_uri,
+        expires_at: Date.now() + 600000 // 10 minutes
+    };
+    
+    tokenCache.set(code, codeData);
+    
+    // Redirect with authorization code
+    const redirectUrl = new URL(redirect_uri);
+    redirectUrl.searchParams.set('code', code);
+    if (state) redirectUrl.searchParams.set('state', state);
+    
+    res.redirect(redirectUrl.toString());
+});
+
+// OAuth Token Endpoint
+app.post('/oauth/token', async (req, res) => {
+    const { grant_type, code, redirect_uri, client_id, client_secret } = req.body;
+    
+    if (grant_type !== 'authorization_code') {
+        return res.status(400).json({
+            error: 'unsupported_grant_type',
+            error_description: 'Only authorization_code grant type is supported'
+        });
+    }
+
+    const client = oauthClientManager.getClient(client_id);
+    if (!client || client.clientSecret !== client_secret) {
+        return res.status(401).json({
+            error: 'invalid_client',
+            error_description: 'Invalid client credentials'
+        });
+    }
+
+    const codeData = tokenCache.get(code);
+    if (!codeData || codeData.client_id !== client_id || codeData.redirect_uri !== redirect_uri) {
+        return res.status(400).json({
+            error: 'invalid_grant',
+            error_description: 'Invalid authorization code'
+        });
+    }
+
+    if (Date.now() > codeData.expires_at) {
+        return res.status(400).json({
+            error: 'invalid_grant',
+            error_description: 'Authorization code expired'
+        });
+    }
+
+    // Generate access token
+    const accessToken = jwt.sign({
+        client_id,
+        scope: codeData.scope
+    }, JWT_SECRET, { expiresIn: '1h' });
+
+    // Generate refresh token
+    const refreshToken = crypto.randomBytes(32).toString('hex');
+    tokenCache.set(refreshToken, {
+        client_id,
+        scope: codeData.scope,
+        expires_at: Date.now() + 30 * 24 * 60 * 60 * 1000 // 30 days
+    });
+
+    // Remove used authorization code
+    tokenCache.del(code);
+
+    // Update client usage
+    await oauthClientManager.updateClientLastUsed(client_id);
+
+    res.json({
+        access_token: accessToken,
+        token_type: 'Bearer',
+        expires_in: 3600,
+        refresh_token: refreshToken,
+        scope: codeData.scope
+    });
+});
+
+// Token Introspection Endpoint
+app.post('/oauth/introspect', async (req, res) => {
+    const { token } = req.body;
+    
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        res.json({
+            active: true,
+            client_id: decoded.client_id,
+            scope: decoded.scope,
+            exp: decoded.exp
+        });
+    } catch (error) {
+        res.json({ active: false });
+    }
+});
+
+// Token Revocation Endpoint
+app.post('/oauth/revoke', async (req, res) => {
+    const { token, token_type_hint } = req.body;
+    
+    if (token_type_hint === 'refresh_token') {
+        tokenCache.del(token);
+    } else {
+        // For access tokens, we can't revoke them directly
+        // They will expire naturally
+        log('info', 'Access token revocation requested', { token: token.substring(0, 8) + '...' });
+    }
+    
+    res.status(200).end();
+});
+
+// OAuth Callback Endpoint
+app.get('/oauth/callback', (req, res) => {
+    const { code, state } = req.query;
+    
+    if (!code) {
+        return res.status(400).send('Authorization code is required');
+    }
+
+    // For testing purposes, we'll just display the code
+    res.send(`
+        <html>
+            <head>
+                <title>OAuth Callback</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+                    .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                    h1 { color: #2563eb; margin-bottom: 20px; }
+                    .code { background: #f8fafc; padding: 15px; border-radius: 5px; font-family: monospace; }
+                    .instructions { margin-top: 20px; color: #4b5563; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>✅ Authorization Successful</h1>
+                    <p>Your authorization code is:</p>
+                    <div class="code">${code}</div>
+                    <div class="instructions">
+                        <p>Please copy this code and paste it into your test client.</p>
+                        <p>State parameter: ${state || 'none'}</p>
+                    </div>
+                </div>
+            </body>
+        </html>
+    `);
+});
+
+// MCP Authentication Middleware
+async function authenticateMCP(req, res, next) {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader) {
+        return res.status(401).json({
+            error: 'unauthorized',
+            error_description: 'No authorization header'
+        });
+    }
+
+    const [type, token] = authHeader.split(' ');
+    
+    if (type === 'Bearer') {
+        try {
+            const decoded = jwt.verify(token, JWT_SECRET);
+            req.client = oauthClientManager.getClient(decoded.client_id);
+            if (!req.client) {
+                throw new Error('Client not found');
+            }
+            req.scope = decoded.scope;
+            next();
+        } catch (error) {
+            return res.status(401).json({
+                error: 'invalid_token',
+                error_description: 'Invalid or expired token'
+            });
+        }
+    } else if (type === 'ApiKey' && token === MCP_API_KEY) {
+        // Legacy API key support
+        next();
+    } else {
+        return res.status(401).json({
+            error: 'unauthorized',
+            error_description: 'Invalid authorization type'
+        });
+    }
+}
+
+// MCP Endpoint
+app.post('/', authenticateMCP, async (req, res) => {
+    try {
+        // Get Home Assistant configuration from the client
+        const haConfig = {
+            url: req.headers['ha-url'],
+            token: req.headers['ha-token']
+        };
+
+        const response = await handleJsonRpcMessage(req.body, haConfig);
+        res.json(response);
+    } catch (error) {
+        log('error', 'JSON-RPC error', { error: error.message, method: req.body?.method });
+        res.json({
+            jsonrpc: "2.0",
+            id: req.body?.id,
+            error: { 
+                code: -32603, 
+                message: error.message,
+                data: {
+                    timestamp: new Date().toISOString(),
+                    method: req.body?.method
+                }
+            }
+        });
+    }
+});
+
+// Health Check
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok' });
+});
+
+// Start server
+async function startServer() {
+    await initializeDataDir();
+    
+    app.listen(PORT, () => {
+        log('info', `Server running on port ${PORT}`);
+        log('info', `OAuth endpoints available at ${SERVER_URL}`);
+        log('info', `OAuth metadata: ${SERVER_URL}/.well-known/oauth-authorization-server`);
+    });
+}
+
+startServer().catch(error => {
+    log('error', 'Failed to start server', error);
+    process.exit(1);
+});

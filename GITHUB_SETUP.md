@@ -6,7 +6,7 @@
 1. Go to [GitHub.com](https://github.com) and sign in
 2. Click the "+" icon → "New repository"
 3. Repository details:
-   - **Name**: `home-assistant-mcp-server`
+   - **Name**: `ha-mcp-bridge`
    - **Description**: `🏠🤖 Home Assistant MCP Server for Claude.ai - Pure Node.js HTTP with OAuth 2.1 + PKCE. Solves tool discovery issues with prompts/list hack and SSE broadcasting.`
    - **Visibility**: Public (recommended for community sharing)
    - **Initialize**: Leave unchecked (we have existing code)
@@ -14,7 +14,7 @@
 ### Step 2: Connect Local Repository to GitHub
 ```bash
 # Add GitHub remote (replace YOUR_USERNAME)
-git remote add origin https://github.com/YOUR_USERNAME/home-assistant-mcp-server.git
+git remote add origin https://github.com/YOUR_USERNAME/ha-mcp-bridge.git
 
 # Push to GitHub
 git branch -M main
@@ -24,7 +24,7 @@ git push -u origin main
 ### Step 3: Repository Structure
 Your repository will contain:
 ```
-home-assistant-mcp-server/
+ha-mcp-bridge/
 ├── README.md                    # Main documentation
 ├── TROUBLESHOOTING_GUIDE.md     # Complete solution guide
 ├── package.json                 # Dependencies
@@ -54,19 +54,19 @@ home-assistant-mcp-server/
 ## 🔗 After Creating Repository
 
 Your repository URL will be:
-**https://github.com/YOUR_USERNAME/home-assistant-mcp-server**
+**https://github.com/YOUR_USERNAME/ha-mcp-bridge**
 
 ### Share Links:
-- **Code**: `https://github.com/YOUR_USERNAME/home-assistant-mcp-server`
-- **Releases**: `https://github.com/YOUR_USERNAME/home-assistant-mcp-server/releases`
-- **Issues**: `https://github.com/YOUR_USERNAME/home-assistant-mcp-server/issues`
+- **Code**: `https://github.com/YOUR_USERNAME/ha-mcp-bridge`
+- **Releases**: `https://github.com/YOUR_USERNAME/ha-mcp-bridge/releases`
+- **Issues**: `https://github.com/YOUR_USERNAME/ha-mcp-bridge/issues`
 
 ## 📢 LinkedIn Post Update
 Once repository is created, add this to your LinkedIn post:
 
 ```hebrew
 🔗 **הקוד זמין כמקור פתוח:**
-github.com/YOUR_USERNAME/home-assistant-mcp-server
+github.com/YOUR_USERNAME/ha-mcp-bridge
 
 מי שרוצה להקים את זה בעצמו - יש לי מדריך מפורט עם כל השלבים!
 ```
