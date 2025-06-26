@@ -33,9 +33,8 @@ function saveSessionData() {
 
 function loadSessionData() {
   try {
-    // FORCE FRESH SESSIONS: Skip loading any cached session data
-    console.log('SKIPPING session persistence - all sessions will be fresh');
-    return;
+    // ENABLE SESSION PERSISTENCE: Load cached session data
+    console.log('LOADING session persistence - restoring saved sessions');
     
     const sessionFile = path.join(DATA_DIR, 'sessions.json');
     if (fs.existsSync(sessionFile)) {
@@ -96,9 +95,9 @@ const ADMIN_USERNAME = 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'your_secure_admin_password_hash';
 const adminSessions = new Map(); // Track authenticated admin sessions
 
-// TEMPORARILY DISABLED: Load existing sessions on startup - force fresh credentials
-// loadSessionData();
-console.log('SESSION PERSISTENCE DISABLED: All sessions will be fresh');
+// ENABLED: Load existing sessions on startup
+loadSessionData();
+console.log('SESSION PERSISTENCE ENABLED: Sessions will be saved and restored');
 
 console.log('Admin Authentication:');
 console.log('Username:', ADMIN_USERNAME);
@@ -254,7 +253,9 @@ async function getTools() {
 
 // Call a tool - now accepts sessionToken for HA connection
 async function callTool(name, args, sessionToken = null) {
-  console.log(`Tool called: ${name}`);
+  console.log(`🔧 TOOL CALL: ${name}`);
+  console.log(`🔧 Tool arguments:`, JSON.stringify(args, null, 2));
+  console.log(`🔧 Session token available:`, sessionToken ? 'YES' : 'NO');
   console.log(`Tool args:`, JSON.stringify(args));
   console.log(`Session token:`, sessionToken ? 'PROVIDED' : 'NULL');
   
@@ -1520,6 +1521,8 @@ const httpServer = http.createServer(async (req, res) => {
             console.log(`SUCCESS: Sending tools response with ${tools.length} tools (unauthenticated discovery)`);
             console.log('Tools being sent:', tools.map(t => t.name).join(', '));
           } else if (message.method === 'tools/call') {
+            console.log(`🎯 RECEIVED TOOL CALL: ${message.params?.name || 'UNKNOWN'}`);
+            console.log(`🎯 Tool call details:`, JSON.stringify(message.params, null, 2));
             // Get session token from authenticated sessions for HA API access
             let sessionToken = null;
             if (sessionId) {
