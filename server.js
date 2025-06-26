@@ -279,20 +279,19 @@ async function callTool(name, args, sessionToken = null) {
         if (args?.domain) {
           filteredEntities = entities.filter(e => e.entity_id.startsWith(args.domain + '.'));
           
-          // Simplify response for large datasets to avoid timeouts
-          if (filteredEntities.length > 20) {
-            const simplified = filteredEntities.map(e => ({
-              entity_id: e.entity_id,
-              state: e.state,
-              friendly_name: e.attributes.friendly_name || e.entity_id
-            }));
-            return {
-              content: [{
-                type: "text",
-                text: `Found ${filteredEntities.length} entities in domain '${args.domain}' (simplified view):\n\n${JSON.stringify(simplified, null, 2)}`
-              }]
-            };
-          }
+          // Create concise human-readable list
+          const summary = filteredEntities.slice(0, 10).map(e => 
+            `• ${e.attributes.friendly_name || e.entity_id}: ${e.state}`
+          ).join('\n');
+          
+          const moreText = filteredEntities.length > 10 ? `\n\n... and ${filteredEntities.length - 10} more entities` : '';
+          
+          return {
+            content: [{
+              type: "text",
+              text: `Found ${filteredEntities.length} entities in domain '${args.domain}':\n\n${summary}${moreText}`
+            }]
+          };
         } else {
           // When getting ALL entities, always simplify to prevent timeouts
           const simplified = entities.map(e => ({
@@ -387,24 +386,27 @@ async function callTool(name, args, sessionToken = null) {
         } else {
           // Get all climate entities with timeout protection
           try {
+            console.log('🌡️ Starting HA API call for climate entities...');
+            const startTime = Date.now();
             const allEntities = await haRequest('/states', {}, sessionToken);
+            const elapsed = Date.now() - startTime;
+            console.log(`🌡️ HA API call completed in ${elapsed}ms, got ${allEntities.length} entities`);
             const climateEntities = allEntities.filter(e => e.entity_id.startsWith('climate.'));
+            console.log(`🌡️ Found ${climateEntities.length} climate entities`);
             
-            // Create simplified response to avoid timeouts
-            const simplifiedClimate = climateEntities.map(entity => ({
-              entity_id: entity.entity_id,
-              state: entity.state,
-              current_temperature: entity.attributes.current_temperature,
-              temperature: entity.attributes.temperature,
-              hvac_mode: entity.attributes.hvac_mode || entity.state,
-              friendly_name: entity.attributes.friendly_name || entity.entity_id,
-              available_modes: entity.attributes.hvac_modes
-            }));
+            // Create concise human-readable summary 
+            const summary = climateEntities.map(entity => {
+              const name = entity.attributes.friendly_name || entity.entity_id;
+              const current = entity.attributes.current_temperature;
+              const target = entity.attributes.temperature;
+              const mode = entity.attributes.hvac_mode || entity.state;
+              return `• ${name}: ${current}°C → ${target}°C (${mode})`;
+            }).join('\n');
             
             return {
               content: [{
                 type: "text",
-                text: JSON.stringify(simplifiedClimate, null, 2)
+                text: `Found ${climateEntities.length} climate entities:\n\n${summary}`
               }]
             };
           } catch (error) {
@@ -422,6 +424,15 @@ async function callTool(name, args, sessionToken = null) {
           content: [{
             type: "text",
             text: "✅ Test tool working! Server is responding correctly. The MCP connection is stable."
+          }]
+        };
+        
+      case "get_climate_simple":
+        // Test climate tool without HA API call
+        return {
+          content: [{
+            type: "text",
+            text: "🌡️ Mock climate data:\n• Living Room AC: 22°C → 24°C (cooling)\n• Bedroom AC: 20°C → 21°C (heating)\n• Kitchen AC: 23°C → 23°C (auto)"
           }]
         };
         
