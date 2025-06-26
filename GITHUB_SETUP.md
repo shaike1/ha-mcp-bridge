@@ -14,7 +14,7 @@
 ### Step 2: Connect Local Repository to GitHub
 ```bash
 # Add GitHub remote (replace YOUR_USERNAME)
-git remote add origin https://github.com/[YOUR_USERNAME]/ha-mcp-bridge.git
+git remote add origin https://github.com/shaike1/ha-mcp-bridge.git
 
 # Push to GitHub
 git branch -M main
@@ -54,19 +54,19 @@ ha-mcp-bridge/
 ## 🔗 After Creating Repository
 
 Your repository URL will be:
-**https://github.com/[YOUR_USERNAME]/ha-mcp-bridge**
+**https://github.com/shaike1/ha-mcp-bridge**
 
 ### Share Links:
-- **Code**: `https://github.com/[YOUR_USERNAME]/ha-mcp-bridge`
-- **Releases**: `https://github.com/[YOUR_USERNAME]/ha-mcp-bridge/releases`
-- **Issues**: `https://github.com/[YOUR_USERNAME]/ha-mcp-bridge/issues`
+- **Code**: `https://github.com/shaike1/ha-mcp-bridge`
+- **Releases**: `https://github.com/shaike1/ha-mcp-bridge/releases`
+- **Issues**: `https://github.com/shaike1/ha-mcp-bridge/issues`
 
 ## 📢 LinkedIn Post Update
 Once repository is created, add this to your LinkedIn post:
 
 ```hebrew
 🔗 **הקוד זמין כמקור פתוח:**
-github.com/[YOUR_USERNAME]/ha-mcp-bridge
+github.com/shaike1/ha-mcp-bridge
 
 מי שרוצה להקים את זה בעצמו - יש לי מדריך מפורט עם כל השלבים!
 ```
