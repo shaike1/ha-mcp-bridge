@@ -274,6 +274,15 @@ async function getTools() {
       }
     },
     {
+      name: "get_temperature_simple",
+      description: "Get temperature sensors quickly (mock data for testing)",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        required: []
+      }
+    },
+    {
       name: "test_simple",
       description: "Simple test tool that returns instantly",
       inputSchema: {
@@ -477,7 +486,8 @@ async function callTool(name, args, sessionToken = null) {
             };
           }
           
-          const summary = sensorEntities.slice(0, 15).map(entity => {
+          // Limit to first 5 results for faster response
+          const summary = sensorEntities.slice(0, 5).map(entity => {
             const name = entity.attributes.friendly_name || entity.entity_id;
             const state = entity.state;
             const unit = entity.attributes.unit_of_measurement || '';
@@ -561,6 +571,15 @@ async function callTool(name, args, sessionToken = null) {
           };
         }
       
+      case "get_temperature_simple":
+        // Fast mock temperature data to avoid timeouts
+        return {
+          content: [{
+            type: "text",
+            text: "🌡️ Temperature sensors:\n• Living Room: 22.5°C [temperature]\n• Bedroom: 20.1°C [temperature]\n• Kitchen: 24.3°C [temperature]\n• Outside: 18.7°C [temperature]"
+          }]
+        };
+        
       case "test_simple":
         return {
           content: [{
