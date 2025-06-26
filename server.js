@@ -150,9 +150,9 @@ async function haRequest(endpoint, options = {}, sessionToken = null) {
   
   const fetch = (await import('node-fetch')).default;
   
-  // Add timeout to prevent hanging connections
+  // Add timeout to prevent hanging connections (increased for Claude.ai stability)
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
   
   try {
     const response = await fetch(apiUrl, {
@@ -162,7 +162,7 @@ async function haRequest(endpoint, options = {}, sessionToken = null) {
         ...options.headers
       },
       signal: controller.signal,
-      timeout: 15000,
+      timeout: 30000,
       ...options
     });
     
@@ -176,7 +176,7 @@ async function haRequest(endpoint, options = {}, sessionToken = null) {
   } catch (error) {
     clearTimeout(timeoutId);
     if (error.name === 'AbortError') {
-      throw new Error('HA API request timed out (15s) - try requesting a specific entity or smaller dataset');
+      throw new Error('HA API request timed out (30s) - try requesting a specific entity or smaller dataset');
     }
     throw error;
   }
@@ -1436,10 +1436,10 @@ const httpServer = http.createServer(async (req, res) => {
         const sessionId = req.headers['mcp-session-id'];
         if (!sessionId) {
           console.log('STREAMABLE HTTP 2025: SSE request without session ID - skipping tool broadcast');
-          // Keep connection alive but don't send tools without session ID
+          // Keep connection alive but don't send tools without session ID (more frequent pings)
           const keepAlive = setInterval(() => {
             res.write('data: {"type":"ping"}\n\n');
-          }, 30000);
+          }, 10000);
           
           req.on('close', () => {
             clearInterval(keepAlive);
@@ -1508,7 +1508,7 @@ const httpServer = http.createServer(async (req, res) => {
             clearInterval(keepAlive);
             console.log('STREAMABLE HTTP 2025: Keep-alive ping failed, connection already closed');
           }
-        }, 15000); // Ping every 15 seconds instead of 30
+        }, 8000); // Ping every 8 seconds for Claude.ai stability
         
         req.on('close', () => {
           clearInterval(keepAlive);
@@ -1895,7 +1895,7 @@ const httpServer = http.createServer(async (req, res) => {
       
       const keepAlive = setInterval(() => {
         res.write('data: {"type":"ping"}\n\n');
-      }, 30000);
+      }, 8000);
       
       req.on('close', () => {
         clearInterval(keepAlive);
@@ -1920,6 +1920,11 @@ const httpServer = http.createServer(async (req, res) => {
   res.end('Not Found');
 });
 
+// Configure server timeouts for Claude.ai stability
+httpServer.timeout = 60000; // 60 seconds request timeout
+httpServer.keepAliveTimeout = 65000; // 65 seconds keep-alive
+httpServer.headersTimeout = 66000; // 66 seconds headers timeout
+
 const PORT = process.env.PORT || 3007; // Use environment PORT or 3007 as fallback
 console.log('Environment PORT:', process.env.PORT);
 console.log('Config port:', PORT);
@@ -1928,4 +1933,5 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Health check: http://0.0.0.0:${PORT}/health`);
   console.log(`MCP endpoint: http://0.0.0.0:${PORT}/`);
   console.log(`OAuth discovery: http://0.0.0.0:${PORT}/.well-known/oauth-authorization-server`);
+  console.log(`Server timeouts: request=${httpServer.timeout}ms, keepAlive=${httpServer.keepAliveTimeout}ms`);
 });
