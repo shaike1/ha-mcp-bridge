@@ -249,6 +249,31 @@ async function getTools() {
       }
     },
     {
+      name: "get_sensors",
+      description: "Get sensor entities including water leak, presence, motion, temperature sensors",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sensor_type: { type: "string", description: "Filter by sensor type: water_leak, presence, motion, temperature, all" }
+        },
+        required: []
+      }
+    },
+    {
+      name: "control_lights",
+      description: "Control lights - turn on/off, set brightness, change color",
+      inputSchema: {
+        type: "object",
+        properties: {
+          entity_id: { type: "string", description: "Light entity ID" },
+          action: { type: "string", description: "Action: turn_on, turn_off, toggle" },
+          brightness: { type: "number", description: "Brightness 0-255 (for turn_on)" },
+          color: { type: "string", description: "Color name or hex code (for turn_on)" }
+        },
+        required: ["entity_id", "action"]
+      }
+    },
+    {
       name: "test_simple",
       description: "Simple test tool that returns instantly",
       inputSchema: {
@@ -419,6 +444,123 @@ async function callTool(name, args, sessionToken = null) {
           }
         }
         
+      case "get_sensors":
+        try {
+          console.log('DEBUG: get_sensors called');
+          
+          const allEntities = await haRequest('/states', {}, sessionToken);
+          let sensorEntities = allEntities.filter(e => 
+            e.entity_id.startsWith('binary_sensor.') || 
+            e.entity_id.startsWith('sensor.')
+          );
+          
+          // Filter by sensor type if specified
+          if (args?.sensor_type && args.sensor_type !== 'all') {
+            const filterMap = {
+              'water_leak': (e) => e.entity_id.includes('leak') || e.entity_id.includes('water') || e.attributes.device_class === 'moisture',
+              'presence': (e) => e.entity_id.includes('presence') || e.entity_id.includes('occupancy') || e.attributes.device_class === 'occupancy',
+              'motion': (e) => e.entity_id.includes('motion') || e.attributes.device_class === 'motion',
+              'temperature': (e) => e.attributes.device_class === 'temperature' || e.attributes.unit_of_measurement === '°C'
+            };
+            
+            if (filterMap[args.sensor_type]) {
+              sensorEntities = sensorEntities.filter(filterMap[args.sensor_type]);
+            }
+          }
+          
+          if (sensorEntities.length === 0) {
+            return {
+              content: [{
+                type: "text",
+                text: `No ${args?.sensor_type || 'sensor'} entities found`
+              }]
+            };
+          }
+          
+          const summary = sensorEntities.slice(0, 15).map(entity => {
+            const name = entity.attributes.friendly_name || entity.entity_id;
+            const state = entity.state;
+            const unit = entity.attributes.unit_of_measurement || '';
+            const deviceClass = entity.attributes.device_class ? `[${entity.attributes.device_class}]` : '';
+            return `• ${name}: ${state}${unit} ${deviceClass}`.trim();
+          }).join('\n');
+          
+          return {
+            content: [{
+              type: "text",
+              text: `Found ${sensorEntities.length} sensor entities:\n\n${summary}`
+            }]
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: `Sensor data temporarily unavailable: ${error.message}`
+            }]
+          };
+        }
+        
+      case "control_lights":
+        try {
+          console.log('DEBUG: control_lights called');
+          
+          if (!args?.entity_id || !args?.action) {
+            return {
+              content: [{
+                type: "text",
+                text: "Missing required parameters: entity_id and action"
+              }]
+            };
+          }
+          
+          let serviceData = { entity_id: args.entity_id };
+          
+          // Add brightness if specified for turn_on
+          if (args.action === 'turn_on' && args.brightness !== undefined) {
+            serviceData.brightness = Math.max(0, Math.min(255, args.brightness));
+          }
+          
+          // Add color if specified for turn_on
+          if (args.action === 'turn_on' && args.color) {
+            if (args.color.startsWith('#')) {
+              serviceData.hex_color = args.color;
+            } else {
+              serviceData.color_name = args.color;
+            }
+          }
+          
+          const result = await haRequest('/services/light/' + args.action, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(serviceData)
+          }, sessionToken);
+          
+          const actionText = {
+            'turn_on': 'turned on',
+            'turn_off': 'turned off', 
+            'toggle': 'toggled'
+          }[args.action] || args.action;
+          
+          const extraInfo = [];
+          if (args.brightness !== undefined) extraInfo.push(`brightness: ${args.brightness}`);
+          if (args.color) extraInfo.push(`color: ${args.color}`);
+          const extraText = extraInfo.length > 0 ? ` (${extraInfo.join(', ')})` : '';
+          
+          return {
+            content: [{
+              type: "text",
+              text: `✅ Light ${args.entity_id} ${actionText}${extraText}`
+            }]
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: "text",
+              text: `Light control failed: ${error.message}`
+            }]
+          };
+        }
+      
       case "test_simple":
         return {
           content: [{
