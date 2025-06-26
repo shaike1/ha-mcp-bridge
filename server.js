@@ -152,7 +152,7 @@ async function haRequest(endpoint, options = {}, sessionToken = null) {
   
   // Add timeout to prevent hanging connections
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
   
   try {
     const response = await fetch(apiUrl, {
@@ -376,27 +376,36 @@ async function callTool(name, args, sessionToken = null) {
             }]
           };
         } else {
-          // Get all climate entities
-          const allClimateEntities = await haRequest('/states', {}, sessionToken);
-          const climateEntities = allClimateEntities.filter(e => e.entity_id.startsWith('climate.'));
-          
-          // Create simplified response to avoid timeouts
-          const simplifiedClimate = climateEntities.map(entity => ({
-            entity_id: entity.entity_id,
-            state: entity.state,
-            current_temperature: entity.attributes.current_temperature,
-            temperature: entity.attributes.temperature,
-            hvac_mode: entity.attributes.hvac_mode || entity.state,
-            friendly_name: entity.attributes.friendly_name || entity.entity_id,
-            available_modes: entity.attributes.hvac_modes
-          }));
-          
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify(simplifiedClimate, null, 2)
-            }]
-          };
+          // Get all climate entities with timeout protection
+          try {
+            const allEntities = await haRequest('/states', {}, sessionToken);
+            const climateEntities = allEntities.filter(e => e.entity_id.startsWith('climate.'));
+            
+            // Create simplified response to avoid timeouts
+            const simplifiedClimate = climateEntities.map(entity => ({
+              entity_id: entity.entity_id,
+              state: entity.state,
+              current_temperature: entity.attributes.current_temperature,
+              temperature: entity.attributes.temperature,
+              hvac_mode: entity.attributes.hvac_mode || entity.state,
+              friendly_name: entity.attributes.friendly_name || entity.entity_id,
+              available_modes: entity.attributes.hvac_modes
+            }));
+            
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify(simplifiedClimate, null, 2)
+              }]
+            };
+          } catch (error) {
+            return {
+              content: [{
+                type: "text",
+                text: `Climate data temporarily unavailable: ${error.message}`
+              }]
+            };
+          }
         }
         
       default:
@@ -1234,38 +1243,47 @@ const httpServer = http.createServer(async (req, res) => {
         // Send SSE connection established event
         res.write('data: {"type":"connection","status":"established"}\n\n');
         
-        // STREAMABLE HTTP 2025: Send tools list as proper MCP notification
-        setTimeout(async () => {
-          try {
-            const tools = await getTools();
-            
-            // Send tools as a tools/list_changed notification per MCP spec
-            const toolsNotification = {
-              jsonrpc: '2.0',
-              method: 'notifications/tools/list_changed',
-              params: {}
-            };
-            
-            console.log(`STREAMABLE HTTP 2025: Sending tools/list_changed notification over SSE`);
-            res.write(`data: ${JSON.stringify(toolsNotification)}\n\n`);
-            
-            // Then send tools as a proper response that Claude should pick up
-            const toolsMessage = {
-              jsonrpc: '2.0',
-              method: 'tools/list',
-              id: 'sse-auto-' + Date.now(),
-              result: {
-                tools: tools
-              }
-            };
-            
-            console.log(`STREAMABLE HTTP 2025: Auto-sending tools/list over SSE (${tools.length} tools)`);
-            res.write(`data: ${JSON.stringify(toolsMessage)}\n\n`);
-            
-          } catch (err) {
-            console.error('STREAMABLE HTTP 2025: Error sending tools over SSE:', err);
-          }
-        }, 500);
+        // STREAMABLE HTTP 2025: Send tools list as proper MCP notification (avoid duplicates)
+        const sessionKey = `sse_${sessionId}`;
+        if (!global.sseSent) global.sseSent = new Set();
+        
+        if (!global.sseSent.has(sessionKey)) {
+          global.sseSent.add(sessionKey);
+          
+          setTimeout(async () => {
+            try {
+              const tools = await getTools();
+              
+              // Send tools as a tools/list_changed notification per MCP spec
+              const toolsNotification = {
+                jsonrpc: '2.0',
+                method: 'notifications/tools/list_changed',
+                params: {}
+              };
+              
+              console.log(`STREAMABLE HTTP 2025: Sending tools/list_changed notification over SSE (session: ${sessionId})`);
+              res.write(`data: ${JSON.stringify(toolsNotification)}\n\n`);
+              
+              // Then send tools as a proper response that Claude should pick up
+              const toolsMessage = {
+                jsonrpc: '2.0',
+                method: 'tools/list',
+                id: 'sse-auto-' + Date.now(),
+                result: {
+                  tools: tools
+                }
+              };
+              
+              console.log(`STREAMABLE HTTP 2025: Auto-sending tools/list over SSE (${tools.length} tools, session: ${sessionId})`);
+              res.write(`data: ${JSON.stringify(toolsMessage)}\n\n`);
+              
+            } catch (err) {
+              console.error('STREAMABLE HTTP 2025: Error sending tools over SSE:', err);
+            }
+          }, 1000);
+        } else {
+          console.log(`STREAMABLE HTTP 2025: Skipping duplicate tool broadcast for session ${sessionId}`);
+        }
         
         // Keep connection alive
         const keepAlive = setInterval(() => {
@@ -1274,6 +1292,10 @@ const httpServer = http.createServer(async (req, res) => {
         
         req.on('close', () => {
           clearInterval(keepAlive);
+          // Clear session tracking to allow reconnection
+          if (global.sseSent && sessionId) {
+            global.sseSent.delete(`sse_${sessionId}`);
+          }
           console.log('STREAMABLE HTTP 2025: SSE connection closed');
         });
         
@@ -1662,8 +1684,9 @@ const httpServer = http.createServer(async (req, res) => {
     } else if (req.method === 'DELETE') {
       const sessionId = req.headers['mcp-session-id'];
       if (sessionId) {
-        sessions.delete(sessionId);
-        console.log(`Session terminated: ${sessionId}`);
+        // Don't delete the session - keep authentication and admin linking
+        // Only close SSE connections (handled by req.on('close') above)
+        console.log(`Session connection terminated: ${sessionId} (keeping auth)`);
       }
       res.writeHead(200);
       res.end();
