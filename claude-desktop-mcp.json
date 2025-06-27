@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "ha-mcp-bridge": {
+      "command": "node",
+      "args": [
+        "/path/to/ha-mcp/server.js"
+      ],
+      "env": {
+        "PORT": "3003",
+        "NODE_ENV": "production",
+        "SERVER_URL": "https://test.right-api.com",
+        "HA_URL": "https://ha.right-api.com",
+        "HA_TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjZDAyZjg1YzViMDY0YTkxODQ4NDY1NDRiM2U0MjEwZCIsImlhdCI6MTc1MDgzNTQwNiwiZXhwIjoyMDY2MTk1NDA2fQ.zc9qKIKE84qGEWd1THhjPzqaH1q7gKRrddQnyMLNkOc"
+      }
+    }
+  }
+}
