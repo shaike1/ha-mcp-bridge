@@ -22,7 +22,12 @@
       "Bash(timeout:*)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(cp:*)"
+      "Bash(cp:*)",
+      "Bash(git init:*)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(git push:*)",
+      "Bash(git reset:*)",
+      "Bash(git add:*)"
     ],
     "deny": []
   }
