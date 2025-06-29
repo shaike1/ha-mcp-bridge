@@ -27,7 +27,9 @@
       "WebFetch(domain:api.github.com)",
       "Bash(git push:*)",
       "Bash(git reset:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "WebFetch(domain:modelcontextprotocol.io)"
     ],
     "deny": []
   }
