@@ -30,7 +30,10 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "WebFetch(domain:modelcontextprotocol.io)",
-      "WebFetch(domain:ha.right-api.com)"
+      "WebFetch(domain:ha.right-api.com)",
+      "Bash(touch:*)",
+      "WebFetch(domain:developers.home-assistant.io)",
+      "WebFetch(domain:www.home-assistant.io)"
     ],
     "deny": []
   }
