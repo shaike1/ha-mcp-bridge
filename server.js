@@ -1278,7 +1278,7 @@ const httpServer = http.createServer(async (req, res) => {
         
         // Verify PKCE if provided
         if (authCode.codeChallenge && authCode.codeChallengeMethod === 'S256') {
-          const hash = createHash('sha256').update(codeVerifier).digest('base64url');
+          const hash = createHash('sha256').update(codeVerifier).digest('hex');
           console.log('PKCE verification:', { 
             provided: authCode.codeChallenge, 
             calculated: hash, 
@@ -1776,8 +1776,9 @@ const httpServer = http.createServer(async (req, res) => {
             console.log(`🎯 Tool call details:`, JSON.stringify(message.params, null, 2));
             // Get session token from authenticated sessions for HA API access
             let sessionToken = null;
+            let sessionData = null;
             if (sessionId) {
-              const sessionData = sessions.get(sessionId);
+              sessionData = sessions.get(sessionId);
               console.log(`MCP Session ${sessionId} data:`, { 
                 authenticated: sessionData?.authenticated, 
                 hasAdminToken: !!sessionData?.adminSessionToken 
