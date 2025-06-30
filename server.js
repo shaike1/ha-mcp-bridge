@@ -6,13 +6,22 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID, createHash } from 'crypto';
 
-// HA Configuration - ONLY set per session via OAuth login flow
-let HA_HOST = '';
-let HA_API_TOKEN = '';
+// HA Configuration - Set from environment variables if available (for add-on),
+// otherwise, will be configured via the OAuth login flow.
+let HA_HOST = process.env.HA_URL || '';
+let HA_API_TOKEN = process.env.HA_TOKEN || '';
 
-console.log('HA Configuration:');
-console.log('HA_HOST:', 'Will be configured via OAuth flow');
-console.log('HA_API_TOKEN:', 'Will be configured via OAuth flow');
+// Check if running in a Home Assistant Add-on environment
+const IS_ADDON = !!(process.env.HA_URL && process.env.HA_TOKEN);
+
+if (IS_ADDON) {
+  console.log('Add-on environment detected. Using HA credentials from environment.');
+} else {
+  console.log('Standalone mode. HA credentials will be configured via OAuth flow.');
+}
+
+console.log('HA_HOST:', HA_HOST ? 'SET' : 'NOT SET');
+console.log('HA_API_TOKEN:', HA_API_TOKEN ? '***SET***' : 'NOT SET');
 
 // Persistent storage directory
 const DATA_DIR = '/app/data';
@@ -961,7 +970,7 @@ const httpServer = http.createServer(async (req, res) => {
             
             <div class="form-group">
                 <label for="ha_host">Home Assistant Host URL:</label>
-                <input type="url" id="ha_host" name="ha_host" placeholder="https://your-ha-instance.com" required>
+                <input type="url" id="ha_host" name="ha_host" placeholder="e.g., http://homeassistant.local:8123" required>
             </div>
             
             <div class="form-group">
@@ -976,7 +985,7 @@ const httpServer = http.createServer(async (req, res) => {
 </html>`;
     
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(loginPage);
+    res.end(loginPage.replace(/<hr style="margin: 20px 0; border: 1px solid #ddd;">[\s\S]*<button/g, '<button'));
     return;
   }
   
