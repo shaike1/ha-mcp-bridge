@@ -8,12 +8,18 @@ A Model Context Protocol (MCP) server for Home Assistant integration with Claude
 - **Claude.ai Tool Discovery Fix** - Implements the `prompts/list` hack for proper tool discovery
 - **OAuth 2.1 + PKCE Authentication** - Secure authentication flow
 - **Real Home Assistant Integration** - Connect to actual HA instances with API tokens
-- **5 Home Assistant Tools**:
+- **10 Home Assistant Tools**:
   - `get_entities` - Get all HA entities or filter by domain
   - `call_service` - Call HA services to control devices
   - `get_automations` - Get all HA automations
   - `get_lights` - Get all light entities
   - `get_switches` - Get all switch entities
+  - `get_climate` - Get climate/HVAC entities
+  - `get_sensors` - Get sensor entities
+  - `control_lights` - Control lights with actions, brightness, and color
+  - `get_temperature_simple` - Mock temperature data for testing
+  - `test_simple` - Simple test tool for connection verification
+- **Token Management** - Register and manage API tokens via a dedicated endpoint.
 
 ## 🚀 Quick Start
 
@@ -69,6 +75,16 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=your_secure_password
 HA_URL=https://your-ha-instance.com
 HA_TOKEN=your_ha_token_here
+```
+
+### API Token Management
+
+You can register a new API token using the `/tokens/register` endpoint:
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+-d '{"description":"my-new-key","scope":"mcp"}' \
+http://localhost:3007/tokens/register
 ```
 
 ## 🏗️ Architecture
