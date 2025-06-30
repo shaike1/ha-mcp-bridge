@@ -6,13 +6,13 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID, createHash } from 'crypto';
 
-// HA Configuration - ONLY set per session via login form (NO environment variables)
+// HA Configuration - ONLY set per session via OAuth login flow
 let HA_HOST = '';
 let HA_API_TOKEN = '';
 
 console.log('HA Configuration:');
-console.log('HA_HOST:', 'Will be configured dynamically via login form');
-console.log('HA_API_TOKEN:', 'Will be configured dynamically via login form');
+console.log('HA_HOST:', 'Will be configured via OAuth flow');
+console.log('HA_API_TOKEN:', 'Will be configured via OAuth flow');
 
 // Persistent storage directory
 const DATA_DIR = '/app/data';
@@ -143,7 +143,7 @@ async function haRequest(endpoint, options = {}, sessionToken = null) {
   }
   
   if (!haHost || !haApiToken) {
-    throw new Error('HA connection not configured. Please login with HA details.');
+    throw new Error('HA connection not configured. Please complete OAuth setup first.');
   }
   
   const apiUrl = `${haHost}/api${endpoint}`;
@@ -388,14 +388,39 @@ async function callTool(name, args, sessionToken = null) {
         };
         
       case "get_lights":
-        const allLightEntities = await haRequest('/states', {}, sessionToken);
-        const lights = allLightEntities.filter(e => e.entity_id.startsWith('light.'));
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(lights, null, 2)
-          }]
-        };
+        console.log('🔍 Starting get_lights - making HA API call to /states');
+        try {
+          const allLightEntities = await haRequest('/states', {}, sessionToken);
+          console.log(`🔍 HA API returned ${allLightEntities?.length || 0} entities`);
+          
+          if (!allLightEntities || !Array.isArray(allLightEntities)) {
+            console.log('❌ HA API response is not an array:', typeof allLightEntities);
+            return {
+              content: [{
+                type: "text", 
+                text: "Error: Invalid response from Home Assistant API"
+              }]
+            };
+          }
+          
+          const lights = allLightEntities.filter(e => e.entity_id.startsWith('light.'));
+          console.log(`🔍 Found ${lights.length} light entities`);
+          
+          return {
+            content: [{
+              type: "text",
+              text: lights.length > 0 ? JSON.stringify(lights, null, 2) : "No light entities found"
+            }]
+          };
+        } catch (error) {
+          console.log('❌ Error in get_lights:', error.message);
+          return {
+            content: [{
+              type: "text",
+              text: `Error retrieving lights: ${error.message}`
+            }]
+          };
+        }
         
       case "get_switches":
         const allSwitchEntities = await haRequest('/states', {}, sessionToken);
@@ -1274,7 +1299,7 @@ const httpServer = http.createServer(async (req, res) => {
           clientId: clientId,
           scope: authCode.scope,
           expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
-          resource: 'https://ha-mcp.right-api.com'
+          resource: process.env.SERVER_URL || 'https://ha-mcp.right-api.com'
         };
         accessTokens.set(accessToken, tokenData);
         
@@ -1326,7 +1351,7 @@ const httpServer = http.createServer(async (req, res) => {
   }
   
   // Health check
-  if (req.method === 'GET' && parsedUrl.pathname === '/health') {
+  if ((req.method === 'GET' || req.method === 'HEAD') && parsedUrl.pathname === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'healthy', server: 'ha-mcp-server' }));
     return;
@@ -1550,6 +1575,7 @@ const httpServer = http.createServer(async (req, res) => {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id, Accept',
+        'WWW-Authenticate': 'Bearer realm="MCP Server"',
         'Access-Control-Max-Age': '86400',
         'Mcp-Transport': 'streamable-http',
         'Mcp-Protocol-Version': '2024-11-05'
@@ -1567,6 +1593,20 @@ const httpServer = http.createServer(async (req, res) => {
       const sessionId = req.headers['mcp-session-id'];
       console.log('Session ID:', sessionId);
       
+      // Force authentication if no authorization header
+      if (!req.headers.authorization && req.method === 'POST') {
+        console.log('No authorization header - forcing OAuth flow');
+        res.writeHead(401, {
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': 'Bearer realm="MCP Server", error="invalid_token"'
+        });
+        res.end(JSON.stringify({
+          error: 'unauthorized',
+          message: 'Bearer token required. Please complete OAuth flow.'
+        }));
+        return;
+      }
+
       let tokenData = verifyToken(req.headers.authorization);
       if (!tokenData && sessionId) {
         console.log('Bearer token not found, checking session auth...');
@@ -1579,37 +1619,6 @@ const httpServer = http.createServer(async (req, res) => {
       let body = '';
       req.on('data', chunk => { body += chunk.toString(); });
       req.on('end', async () => {
-        
-        // FORCE AUTHENTICATION: No unauthenticated requests allowed
-        console.log('FORCE AUTH: All requests require authentication to ensure HA credentials are available');
-        allowUnauthenticated = false;
-        
-        // Only check authentication after we've determined if it's a discovery request
-        if (!tokenData && !allowUnauthenticated) {
-          console.log('Neither Bearer token nor session auth verified - auth required for this method');
-          
-          console.log('No valid Bearer token or session auth - returning 401 to trigger OAuth flow');
-          res.writeHead(401, { 
-            'Content-Type': 'application/json',
-            'WWW-Authenticate': 'Bearer realm="MCP Server", scope="mcp"'
-          });
-          res.end(JSON.stringify({
-            jsonrpc: '2.0',
-            id: null,
-            error: {
-              code: -32001,
-              message: 'Unauthorized - OAuth authentication required',
-              data: {
-                auth_url: `${process.env.SERVER_URL || 'https://ha-mcp.right-api.com'}/.well-known/oauth-authorization-server`
-              }
-            }
-          }));
-          return;
-        } else if (tokenData) {
-          console.log('Authentication verified successfully via Bearer token');
-        } else {
-          console.log('Proceeding with unauthenticated discovery request');
-        }
         try {
           const message = JSON.parse(body);
           console.log('Received MCP message:', JSON.stringify(message, null, 2));
@@ -1776,15 +1785,33 @@ const httpServer = http.createServer(async (req, res) => {
               if (sessionData && sessionData.authenticated && sessionData.adminSessionToken) {
                 // Use the admin session token linked to this MCP session
                 sessionToken = sessionData.adminSessionToken;
-                const adminSession = adminSessions.get(sessionToken);
-                console.log(`SUCCESS: Using admin session token for HA API: ${sessionToken.substring(0, 8)}...`);
-                console.log(`Admin session HA Host: ${adminSession?.haHost || 'NOT SET'}`);
-                console.log(`Admin session API Token: ${adminSession?.haApiToken ? 'SET' : 'NOT SET'}`);
-              } else {
-                console.log('WARNING: No admin session token found for this MCP session - will use environment variables');
-                console.log(`Session authenticated: ${sessionData?.authenticated}`);
-                console.log(`Session has admin token: ${!!sessionData?.adminSessionToken}`);
               }
+            }
+            
+            // If no session token from sessionId, try bearer token lookup
+            if (!sessionToken && tokenData && req.headers.authorization) {
+              console.log('🔍 No session token from sessionId, checking bearer token for admin session...');
+              const bearerToken = req.headers.authorization.substring(7); // Remove "Bearer "
+              console.log(`🔍 Looking up bearer token: ${bearerToken.substring(0, 8)}...`);
+              // Look up authenticated session by bearer token
+              const authSession = authenticatedSessions.get(bearerToken);
+              if (authSession && authSession.adminSessionToken) {
+                sessionToken = authSession.adminSessionToken;
+                console.log(`SUCCESS: Found admin session via bearer token: ${sessionToken.substring(0, 8)}...`);
+              } else {
+                console.log('❌ No authenticated session found for bearer token');
+              }
+            }
+            
+            if (sessionToken) {
+              const adminSession = adminSessions.get(sessionToken);
+              console.log(`SUCCESS: Using admin session token for HA API: ${sessionToken.substring(0, 8)}...`);
+              console.log(`Admin session HA Host: ${adminSession?.haHost || 'NOT SET'}`);
+              console.log(`Admin session API Token: ${adminSession?.haApiToken ? 'SET' : 'NOT SET'}`);
+            } else {
+              console.log('WARNING: No admin session token found for this MCP session - will use environment variables');
+              console.log(`Session authenticated: ${sessionData?.authenticated}`);
+              console.log(`Session has admin token: ${!!sessionData?.adminSessionToken}`);
             }
             
             const result = await callTool(message.params.name, message.params.arguments || {}, sessionToken);
@@ -1844,7 +1871,6 @@ const httpServer = http.createServer(async (req, res) => {
           }));
         }
       });
-      
     } else if (req.method === 'GET') {
       const acceptsSSE = req.headers.accept?.includes('text/event-stream') && req.headers.authorization;
       
