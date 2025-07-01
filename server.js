@@ -48,6 +48,59 @@ function areCredentialsSet() {
 
 // --- END: New Setup Flow ---
 
+// Comprehensive session validation function
+function validateSession(bearerToken) {
+  if (!bearerToken) {
+    console.log('Session validation failed: No bearer token provided');
+    return { valid: false, reason: 'no_bearer_token' };
+  }
+  
+  const authSession = authenticatedSessions.get(bearerToken);
+  if (!authSession) {
+    console.log(`Session validation failed: Bearer token ${bearerToken.substring(0, 8)}... not found`);
+    return { valid: false, reason: 'bearer_token_not_found' };
+  }
+  
+  // Check if token is expired
+  if (authSession.tokenData && new Date(authSession.tokenData.expiresAt) <= new Date()) {
+    console.log(`Session validation failed: Bearer token ${bearerToken.substring(0, 8)}... expired`);
+    authenticatedSessions.delete(bearerToken);
+    return { valid: false, reason: 'bearer_token_expired' };
+  }
+  
+  // Check if linked admin session exists and is valid
+  const adminSessionToken = authSession.adminSessionToken;
+  if (!adminSessionToken) {
+    console.log(`Session validation failed: No linked admin session for bearer token ${bearerToken.substring(0, 8)}...`);
+    return { valid: false, reason: 'no_admin_session_link' };
+  }
+  
+  const adminSession = adminSessions.get(adminSessionToken);
+  if (!adminSession) {
+    console.log(`Session validation failed: Linked admin session ${adminSessionToken.substring(0, 8)}... not found`);
+    authenticatedSessions.delete(bearerToken);
+    return { valid: false, reason: 'admin_session_not_found' };
+  }
+  
+  if (new Date(adminSession.expiresAt) <= new Date()) {
+    console.log(`Session validation failed: Linked admin session ${adminSessionToken.substring(0, 8)}... expired`);
+    adminSessions.delete(adminSessionToken);
+    authenticatedSessions.delete(bearerToken);
+    return { valid: false, reason: 'admin_session_expired' };
+  }
+  
+  console.log(`Session validation passed: Bearer token ${bearerToken.substring(0, 8)}... is valid`);
+  return { 
+    valid: true, 
+    authSession: authSession, 
+    adminSession: adminSession,
+    haCredentials: {
+      host: adminSession.haHost,
+      token: adminSession.haToken
+    }
+  };
+}
+
 // Session persistence functions
 function saveSessionData() {
   const sessionData = {
@@ -1609,18 +1662,15 @@ const httpServer = http.createServer(async (req, res) => {
           console.log(`STREAMABLE HTTP 2025: SSE checking bearer token auth: ${authHeader ? 'present' : 'missing'}`);
           if (authHeader && authHeader.startsWith('Bearer ')) {
             const bearerToken = authHeader.substring(7);
-            console.log(`STREAMABLE HTTP 2025: SSE looking up bearer token: ${bearerToken.substring(0, 8)}...`);
-            console.log(`STREAMABLE HTTP 2025: SSE authenticated sessions count: ${authenticatedSessions.size}`);
-            const authSession = authenticatedSessions.get(bearerToken);
-            console.log(`STREAMABLE HTTP 2025: SSE bearer token lookup result: ${authSession ? 'found' : 'not found'}`);
-            if (authSession) {
-              // Validate that the linked admin session is still valid
-              const adminSession = adminSessions.get(authSession.adminSessionToken);
-              if (!adminSession || new Date(adminSession.expiresAt) <= new Date()) {
-                console.log(`STREAMABLE HTTP 2025: SSE linked admin session expired, invalidating bearer token`);
-                authenticatedSessions.delete(bearerToken);
-                return; // Exit early - invalid session
-              }
+            console.log(`STREAMABLE HTTP 2025: SSE validating bearer token: ${bearerToken.substring(0, 8)}...`);
+            
+            const validation = validateSession(bearerToken);
+            if (!validation.valid) {
+              console.log(`STREAMABLE HTTP 2025: SSE session validation failed: ${validation.reason}`);
+              return; // Exit early - invalid session
+            }
+            
+            const authSession = validation.authSession;
               // Bearer token is valid, use the most recent session ID from active sessions
               // Look for active sessions with this bearer token
               for (const [sessionKey, sessionData] of Object.entries(global.activeSessions || {})) {
