@@ -6,6 +6,8 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID, createHash } from 'crypto';
 
+const SERVER_URL = process.env.SERVER_URL || 'http://localhost:3000';
+
 // HA Configuration - Set from environment variables if available (for add-on),
 // otherwise, will be configured via the OAuth login flow.
 let HA_HOST = process.env.HA_URL || '';
@@ -28,6 +30,23 @@ const DATA_DIR = '/app/data';
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
+
+// --- NEW: Setup Flow ---
+const ENV_FILE_PATH = path.join('/app', '.env');
+
+function areCredentialsSet() {
+  // Check both environment variables and the .env file
+  if (process.env.HA_URL && process.env.HA_TOKEN) {
+    return true;
+  }
+  if (fs.existsSync(ENV_FILE_PATH)) {
+    const envContent = fs.readFileSync(ENV_FILE_PATH, 'utf8');
+    return envContent.includes('HA_URL=') && envContent.includes('HA_TOKEN=');
+  }
+  return false;
+}
+
+// --- END: New Setup Flow ---
 
 // Session persistence functions
 function saveSessionData() {
@@ -393,7 +412,8 @@ async function callTool(name, args, sessionToken = null) {
           }]
         };
         
-        } catch (error) {
+        }
+        catch (error) {
           console.log('❌ Error in get_entities:', error.message);
           return {
             content: [{
@@ -596,77 +616,55 @@ async function callTool(name, args, sessionToken = null) {
         
       case "control_lights":
         try {
-          console.log('DEBUG: control_lights called');
+          console.log('DEBUG: control_lights called with args:', JSON.stringify(args, null, 2));
           
           if (!args?.entity_id || !args?.action) {
-            // Get available lights to show user
-            try {
-              const allEntities = await haRequest('/states', {}, sessionToken);
-              const lights = allEntities.filter(e => e.entity_id.startsWith('light.'));
-              const lightList = lights.slice(0, 5).map(light => 
-                `• ${light.entity_id} (${light.attributes.friendly_name || light.entity_id})`
-              ).join('\n');
-              
-              return {
-                content: [{
-                  type: "text",
-                  text: `Missing required parameters: entity_id and action\n\nAvailable lights:\n${lightList}\n\nExample: control_lights with entity_id="${lights[0]?.entity_id || 'light.example'}" and action="turn_on"`
-                }]
-              };
-            } catch (error) {
-              return {
-                content: [{
-                  type: "text",
-                  text: "Missing required parameters: entity_id and action. Please provide a valid light entity_id and action (turn_on, turn_off, toggle)"
-                }]
-              };
-            }
+            const allEntities = await haRequest('/states', {}, sessionToken);
+            const lights = allEntities.filter(e => e.entity_id.startsWith('light.'));
+            const lightList = lights.slice(0, 10).map(light => 
+              `• ${light.entity_id} (${light.attributes.friendly_name || 'No friendly name'})`
+            ).join('\n');
+            
+            return {
+              content: [{
+                type: "text",
+                text: `Error: Missing required parameters 'entity_id' and 'action'.\n\nAvailable lights:\n${lightList}\n\nExample: control_lights(entity_id: "light.example_light", action: "turn_on")`
+              }]
+            };
           }
           
           let serviceData = { entity_id: args.entity_id };
           
-          // Add brightness if specified for turn_on
-          if (args.action === 'turn_on' && args.brightness !== undefined) {
-            serviceData.brightness = Math.max(0, Math.min(255, args.brightness));
-          }
-          
-          // Add color if specified for turn_on
-          if (args.action === 'turn_on' && args.color) {
-            if (args.color.startsWith('#')) {
-              serviceData.hex_color = args.color;
-            } else {
-              serviceData.color_name = args.color;
+          if (args.action === 'turn_on') {
+            if (args.brightness) serviceData.brightness = args.brightness;
+            if (args.color) {
+              if (args.color.startsWith('#')) {
+                serviceData.hex_color = args.color;
+              } else {
+                serviceData.color_name = args.color;
+              }
             }
           }
           
-          const result = await haRequest('/services/light/' + args.action, {
+          console.log('DEBUG: Calling light service with data:', JSON.stringify(serviceData, null, 2));
+          
+          const result = await haRequest(`/services/light/${args.action}`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(serviceData)
           }, sessionToken);
           
-          const actionText = {
-            'turn_on': 'turned on',
-            'turn_off': 'turned off', 
-            'toggle': 'toggled'
-          }[args.action] || args.action;
-          
-          const extraInfo = [];
-          if (args.brightness !== undefined) extraInfo.push(`brightness: ${args.brightness}`);
-          if (args.color) extraInfo.push(`color: ${args.color}`);
-          const extraText = extraInfo.length > 0 ? ` (${extraInfo.join(', ')})` : '';
-          
           return {
             content: [{
               type: "text",
-              text: `✅ Light ${args.entity_id} ${actionText}${extraText}`
+              text: `Successfully called service light.${args.action} for entity ${args.entity_id}.`
             }]
           };
         } catch (error) {
+          console.error('Error in control_lights:', error.message);
           return {
             content: [{
               type: "text",
-              text: `Light control failed: ${error.message}`
+              text: `Light control failed: ${error.message}. Please check the entity_id and action.`
             }]
           };
         }
@@ -751,6 +749,46 @@ function verifySessionAuth(sessionId) {
 
 // OAuth and MCP server
 const httpServer = http.createServer(async (req, res) => {
+  // --- NEW: Setup Flow ---
+  if (!areCredentialsSet()) {
+    if (req.method === 'POST' && req.url === '/setup') {
+      let body = '';
+      req.on('data', chunk => { body += chunk.toString(); });
+      req.on('end', () => {
+        const params = new URLSearchParams(body);
+        const ha_url = params.get('ha_url');
+        const ha_token = params.get('ha_token');
+        
+        const envContent = `HA_URL=${ha_url}\nHA_TOKEN=${ha_token}\n`;
+        fs.writeFileSync(ENV_FILE_PATH, envContent);
+        
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<h1>Credentials saved!</h1><p>Please restart the container to apply the changes.</p>');
+      });
+      return;
+    }
+    
+    if (req.method === 'GET' && req.url === '/setup.html') {
+        const setupPagePath = path.join('/app', 'public', 'setup.html');
+        if (fs.existsSync(setupPagePath)) {
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            fs.createReadStream(setupPagePath).pipe(res);
+        } else {
+            res.writeHead(404);
+            res.end('Setup page not found.');
+        }
+        return;
+    }
+
+    // Redirect to setup page if credentials are not set
+    if (req.url !== '/setup.html') {
+        res.writeHead(302, { 'Location': '/setup.html' });
+        res.end();
+        return;
+    }
+  }
+  // --- END: New Setup Flow ---
+
   console.log(`${req.method} ${req.url}`);
   
   // CORS headers
@@ -1102,6 +1140,11 @@ const httpServer = http.createServer(async (req, res) => {
             adminSessions.delete(tempToken); // Clean up temp session
             
             console.log('HA connection test successful');
+
+            // **FIX: Persist the successful HA credentials globally**
+            HA_HOST = ha_host;
+            HA_API_TOKEN = ha_api_token;
+            console.log('Set global HA credentials from successful login');
             
             // Create admin session with HA connection details
             const sessionToken = createAdminSession(ha_host, ha_api_token);
@@ -1380,7 +1423,7 @@ const httpServer = http.createServer(async (req, res) => {
           clientId: clientId,
           scope: authCode.scope,
           expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
-          resource: process.env.SERVER_URL || 'https://ha-mcp.right-api.com'
+          resource: SERVER_URL
         };
         accessTokens.set(accessToken, tokenData);
         
@@ -1433,8 +1476,27 @@ const httpServer = http.createServer(async (req, res) => {
   
   // Health check
   if ((req.method === 'GET' || req.method === 'HEAD') && parsedUrl.pathname === '/health') {
+    const health = {
+      status: 'healthy',
+      server: 'ha-mcp-server',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      services: {
+        mcp_bridge: 'running'
+      }
+    };
+
+    // Check if cloudflared is enabled
+    if (process.env.CLOUDFLARED_TOKEN) {
+      health.services.cloudflared = 'enabled';
+      health.tunnel_status = 'configured';
+    } else {
+      health.services.cloudflared = 'disabled';
+      health.tunnel_status = 'not_configured';
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'healthy', server: 'ha-mcp-server' }));
+    res.end(JSON.stringify(health, null, 2));
     return;
   }
   
@@ -1450,17 +1512,17 @@ const httpServer = http.createServer(async (req, res) => {
       description_for_model: "Plugin for accessing Home Assistant devices, entities, and services. Allows listing, reading, and controlling smart home devices.",
       auth: {
         type: "oauth",
-        authorization_url: `${process.env.SERVER_URL || 'https://ha-mcp.right-api.com'}/oauth/authorize`,
+        authorization_url: `${SERVER_URL}/oauth/authorize`,
         scope: "mcp"
       },
       api: {
         type: "openapi",
-        url: `${process.env.SERVER_URL || 'https://ha-mcp.right-api.com'}/tools`,
+        url: `${SERVER_URL}/tools`,
         is_user_authenticated: true
       },
-      logo_url: `${process.env.SERVER_URL || 'https://ha-mcp.right-api.com'}/logo.png`,
+      logo_url: `${SERVER_URL}/logo.png`,
       contact_email: "admin@ha-mcp.right-api.com",
-      legal_info_url: `${process.env.SERVER_URL || 'https://ha-mcp.right-api.com'}/legal`
+      legal_info_url: `${SERVER_URL}/legal`
     };
     
     res.writeHead(200, { 
@@ -1845,7 +1907,7 @@ const httpServer = http.createServer(async (req, res) => {
                 result: {
                   tools: tools,
                   _auth_required: true,
-                  _auth_url: `${process.env.SERVER_URL || 'https://ha-mcp.right-api.com'}/.well-known/oauth-authorization-server`
+                  _auth_url: `${SERVER_URL}/.well-known/oauth-authorization-server`
                 }
               };
               console.log(`DISCOVERY: Sent ${tools.length} tools with auth requirement:`, tools.map(t => t.name).join(', '));
@@ -1998,80 +2060,26 @@ const httpServer = http.createServer(async (req, res) => {
           description: 'Home Assistant Model Context Protocol Server with OAuth 2.1',
           status: 'running',
           transport: 'Streamable HTTP',
-          authorization: 'OAuth 2.1',
-          specification: '2025-03-26',
-          endpoints: {
-            health: '/health',
-            mcp: '/',
-            authorization: '/oauth/authorize',
-            token: '/oauth/token',
-            register: '/oauth/register',
-            discovery: '/.well-known/oauth-authorization-server',
-            token_registration: '/tokens/register',
-            token_management: '/tokens'
-          }
+          docs: 'https://github.com/your-repo/ha-mcp-bridge'
         }));
         return;
       }
-      
-      // SSE streaming requires auth
-      const tokenData = verifyToken(req.headers.authorization);
-      if (!tokenData) {
-        res.writeHead(401);
-        res.end('Unauthorized');
-        return;
-      }
-      
-      const sessionId = req.headers['mcp-session-id'];
-      if (!sessionId) {
-        res.writeHead(400);
-        res.end('Session ID required for streaming');
-        return;
-      }
-      
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
-      });
-      
-      const keepAlive = setInterval(() => {
-        res.write('data: {"type":"ping"}\n\n');
-      }, 8000);
-      
-      req.on('close', () => {
-        clearInterval(keepAlive);
-      });
-      
-    } else if (req.method === 'DELETE') {
-      const sessionId = req.headers['mcp-session-id'];
-      if (sessionId) {
-        // Don't delete the session - keep authentication and admin linking
-        // Only close SSE connections (handled by req.on('close') above)
-        console.log(`Session connection terminated: ${sessionId} (keeping auth)`);
-      }
-      res.writeHead(200);
-      res.end();
     }
-    
-    return;
   }
   
-  // Default 404
-  res.writeHead(404);
-  res.end('Not Found');
+  // Fallback for other routes
+  else {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not Found' }));
+  }
 });
 
-// Configure server timeouts for Claude.ai stability
+const PORT = process.env.PORT || 3000;
 httpServer.timeout = 60000; // 60 seconds request timeout
 httpServer.keepAliveTimeout = 65000; // 65 seconds keep-alive
 httpServer.headersTimeout = 66000; // 66 seconds headers timeout
 
-const PORT = process.env.PORT || 3007; // Use environment PORT or 3007 as fallback
-console.log('Environment PORT:', process.env.PORT);
-console.log('Config port:', PORT);
 httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`HA MCP Server (OAuth 2.1 + Streamable HTTP) running on port ${PORT}`);
   console.log(`Health check: http://0.0.0.0:${PORT}/health`);
   console.log(`MCP endpoint: http://0.0.0.0:${PORT}/`);
   console.log(`OAuth discovery: http://0.0.0.0:${PORT}/.well-known/oauth-authorization-server`);
