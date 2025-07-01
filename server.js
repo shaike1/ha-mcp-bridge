@@ -220,6 +220,20 @@ async function getTools() {
       }
     },
     {
+      name: "homeassistant_call_service",
+      description: "Call a Home Assistant service to control devices (namespaced version)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          domain: { type: "string", description: "Service domain" },
+          service: { type: "string", description: "Service name" },
+          entity_id: { type: "string", description: "Target entity ID" },
+          data: { type: "object", description: "Additional service data" }
+        },
+        required: ["domain", "service"]
+      }
+    },
+    {
       name: "get_automations",
       description: "Get all Home Assistant automations",
       inputSchema: {
@@ -316,18 +330,21 @@ async function callTool(name, args, sessionToken = null) {
     switch (name) {
       case "get_entities":
         console.log('DEBUG: get_entities called with sessionToken:', sessionToken ? 'PROVIDED' : 'NULL');
-        const entities = await haRequest('/states', {}, sessionToken);
+        console.log('🔍 Starting get_entities - making HA API call to /states');
+        try {
+          const entities = await haRequest('/states', {}, sessionToken);
+          console.log(`🔍 HA API returned ${entities?.length || 0} entities for get_entities`);
         
-        let filteredEntities = entities;
+          let filteredEntities = entities;
         if (args?.domain) {
           filteredEntities = entities.filter(e => e.entity_id.startsWith(args.domain + '.'));
           
-          // Create concise human-readable list
-          const summary = filteredEntities.slice(0, 10).map(e => 
-            `• ${e.attributes.friendly_name || e.entity_id}: ${e.state}`
+          // Create ultra-concise list for Claude.ai compatibility
+          const summary = filteredEntities.slice(0, 5).map(e => 
+            `${e.attributes.friendly_name || e.entity_id}: ${e.state}`
           ).join('\n');
           
-          const moreText = filteredEntities.length > 10 ? `\n\n... and ${filteredEntities.length - 10} more entities` : '';
+          const moreText = filteredEntities.length > 5 ? `\n... and ${filteredEntities.length - 5} more` : '';
           
           return {
             content: [{
@@ -355,10 +372,16 @@ async function callTool(name, args, sessionToken = null) {
             return acc;
           }, {});
           
+          // Limit response size to prevent Claude.ai timeouts
+          const limitedByDomain = {};
+          Object.keys(byDomain).slice(0, 10).forEach(domain => {
+            limitedByDomain[domain] = byDomain[domain].slice(0, 5);
+          });
+          
           return {
             content: [{
               type: "text",
-              text: `Found ${entities.length} total entities grouped by domain (use domain filter for detailed view):\n\n${JSON.stringify(byDomain, null, 2)}`
+              text: `Found ${entities.length} total entities (showing first 10 domains, 5 entities each):\n\n${JSON.stringify(limitedByDomain, null, 2)}\n\nUse domain filter like get_entities(domain: 'light') for full results.`
             }]
           };
         }
@@ -370,7 +393,18 @@ async function callTool(name, args, sessionToken = null) {
           }]
         };
         
+        } catch (error) {
+          console.log('❌ Error in get_entities:', error.message);
+          return {
+            content: [{
+              type: "text",
+              text: `Error retrieving entities: ${error.message}`
+            }]
+          };
+        }
+        
       case "call_service":
+      case "homeassistant_call_service":
         const serviceData = { ...args.data };
         if (args.entity_id) serviceData.entity_id = args.entity_id;
         
@@ -415,10 +449,26 @@ async function callTool(name, args, sessionToken = null) {
           const lights = allLightEntities.filter(e => e.entity_id.startsWith('light.'));
           console.log(`🔍 Found ${lights.length} light entities`);
           
+          // Ultra-concise response for Claude.ai compatibility
+          if (lights.length === 0) {
+            return {
+              content: [{
+                type: "text",
+                text: "No light entities found"
+              }]
+            };
+          }
+          
+          const summary = lights.slice(0, 5).map(light => 
+            `${light.attributes.friendly_name || light.entity_id}: ${light.state}`
+          ).join('\n');
+          
+          const moreText = lights.length > 5 ? `\n... and ${lights.length - 5} more lights` : '';
+          
           return {
             content: [{
               type: "text",
-              text: lights.length > 0 ? JSON.stringify(lights, null, 2) : "No light entities found"
+              text: `Found ${lights.length} lights:\n${summary}${moreText}`
             }]
           };
         } catch (error) {
@@ -549,12 +599,28 @@ async function callTool(name, args, sessionToken = null) {
           console.log('DEBUG: control_lights called');
           
           if (!args?.entity_id || !args?.action) {
-            return {
-              content: [{
-                type: "text",
-                text: "Missing required parameters: entity_id and action"
-              }]
-            };
+            // Get available lights to show user
+            try {
+              const allEntities = await haRequest('/states', {}, sessionToken);
+              const lights = allEntities.filter(e => e.entity_id.startsWith('light.'));
+              const lightList = lights.slice(0, 5).map(light => 
+                `• ${light.entity_id} (${light.attributes.friendly_name || light.entity_id})`
+              ).join('\n');
+              
+              return {
+                content: [{
+                  type: "text",
+                  text: `Missing required parameters: entity_id and action\n\nAvailable lights:\n${lightList}\n\nExample: control_lights with entity_id="${lights[0]?.entity_id || 'light.example'}" and action="turn_on"`
+                }]
+              };
+            } catch (error) {
+              return {
+                content: [{
+                  type: "text",
+                  text: "Missing required parameters: entity_id and action. Please provide a valid light entity_id and action (turn_on, turn_off, toggle)"
+                }]
+              };
+            }
           }
           
           let serviceData = { entity_id: args.entity_id };
@@ -842,12 +908,18 @@ const httpServer = http.createServer(async (req, res) => {
       clients.set(client_id, client);
     }
     
-    // Check if user is already authenticated
+    // Check if user is already authenticated - but force login for new OAuth flows
     const sessionCookie = req.headers.cookie?.split(';')
       .find(c => c.trim().startsWith('admin_session='))
       ?.split('=')[1];
     
-    if (sessionCookie && verifyAdminSession(sessionCookie)) {
+    // Check if user has valid session cookie AND it was created after server start
+    // This forces fresh login when server restarts
+    const serverStartTime = process.uptime() * 1000; // Server uptime in ms
+    const sessionValid = sessionCookie && verifyAdminSession(sessionCookie);
+    const sessionIsRecent = sessionValid && adminSessions.get(sessionCookie)?.createdAt > Date.now() - serverStartTime;
+    
+    if (sessionValid && sessionIsRecent) {
       // User is authenticated, show consent page
       const consentPage = `
 <!DOCTYPE html>
@@ -970,7 +1042,7 @@ const httpServer = http.createServer(async (req, res) => {
             
             <div class="form-group">
                 <label for="ha_host">Home Assistant Host URL:</label>
-                <input type="url" id="ha_host" name="ha_host" placeholder="e.g., http://homeassistant.local:8123" required>
+                <input type="url" id="ha_host" name="ha_host" value="https://ha.right-api.com" placeholder="e.g., http://homeassistant.local:8123" required>
             </div>
             
             <div class="form-group">
@@ -985,7 +1057,7 @@ const httpServer = http.createServer(async (req, res) => {
 </html>`;
     
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(loginPage.replace(/<hr style="margin: 20px 0; border: 1px solid #ddd;">[\s\S]*<button/g, '<button'));
+    res.end(loginPage);
     return;
   }
   
@@ -1287,7 +1359,7 @@ const httpServer = http.createServer(async (req, res) => {
         
         // Verify PKCE if provided
         if (authCode.codeChallenge && authCode.codeChallengeMethod === 'S256') {
-          const hash = createHash('sha256').update(codeVerifier).digest('hex');
+          const hash = createHash('sha256').update(codeVerifier).digest('base64url');
           console.log('PKCE verification:', { 
             provided: authCode.codeChallenge, 
             calculated: hash, 
@@ -1448,6 +1520,7 @@ const httpServer = http.createServer(async (req, res) => {
     // STREAMABLE HTTP 2025: Handle GET requests for SSE upgrade
     if (req.method === 'GET') {
       console.log('STREAMABLE HTTP 2025: GET request - checking for SSE upgrade');
+      console.log('STREAMABLE HTTP 2025: GET request headers:', JSON.stringify(req.headers, null, 2));
       
       if (supportsSSE) {
         console.log('STREAMABLE HTTP 2025: Upgrading to SSE connection');
@@ -1466,10 +1539,43 @@ const httpServer = http.createServer(async (req, res) => {
         // Send SSE connection established event
         res.write('data: {"type":"connection","status":"established"}\n\n');
         
-        // Get session ID for duplicate prevention
-        const sessionId = req.headers['mcp-session-id'];
+        // Get session ID for duplicate prevention - try header first, then derive from bearer token
+        let sessionId = req.headers['mcp-session-id'];
+        
         if (!sessionId) {
-          console.log('STREAMABLE HTTP 2025: SSE request without session ID - skipping tool broadcast');
+          // Try to get session from bearer token
+          const authHeader = req.headers.authorization;
+          console.log(`STREAMABLE HTTP 2025: SSE checking bearer token auth: ${authHeader ? 'present' : 'missing'}`);
+          if (authHeader && authHeader.startsWith('Bearer ')) {
+            const bearerToken = authHeader.substring(7);
+            console.log(`STREAMABLE HTTP 2025: SSE looking up bearer token: ${bearerToken.substring(0, 8)}...`);
+            console.log(`STREAMABLE HTTP 2025: SSE authenticated sessions count: ${authenticatedSessions.size}`);
+            const authSession = authenticatedSessions.get(bearerToken);
+            console.log(`STREAMABLE HTTP 2025: SSE bearer token lookup result: ${authSession ? 'found' : 'not found'}`);
+            if (authSession) {
+              // Bearer token is valid, use the most recent session ID from active sessions
+              // Look for active sessions with this bearer token
+              for (const [sessionKey, sessionData] of Object.entries(global.activeSessions || {})) {
+                if (sessionData && sessionData.bearerToken === bearerToken) {
+                  sessionId = sessionKey;
+                  console.log(`STREAMABLE HTTP 2025: SSE using active session ID: ${sessionId}`);
+                  break;
+                }
+              }
+              
+              if (!sessionId) {
+                // Generate a temporary session ID based on bearer token
+                sessionId = `sse_${bearerToken.substring(0, 8)}`;
+                console.log(`STREAMABLE HTTP 2025: SSE using temporary session ID: ${sessionId}`);
+              }
+            } else {
+              console.log(`STREAMABLE HTTP 2025: SSE auth session not found for bearer token`);
+            }
+          }
+        }
+        
+        if (!sessionId) {
+          console.log('STREAMABLE HTTP 2025: SSE request without session ID or bearer token - skipping tool broadcast');
           // Keep connection alive but don't send tools without session ID (more frequent pings)
           const keepAlive = setInterval(() => {
             res.write('data: {"type":"ping"}\n\n');
