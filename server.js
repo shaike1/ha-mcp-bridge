@@ -1141,10 +1141,9 @@ const httpServer = http.createServer(async (req, res) => {
             
             console.log('HA connection test successful');
 
-            // **FIX: Persist the successful HA credentials globally**
-            HA_HOST = ha_host;
-            HA_API_TOKEN = ha_api_token;
-            console.log('Set global HA credentials from successful login');
+            // Session-specific credentials are stored in adminSessions only
+            // Global credentials remain unchanged to maintain session isolation
+            console.log('HA credentials stored in session-specific storage only');
             
             // Create admin session with HA connection details
             const sessionToken = createAdminSession(ha_host, ha_api_token);
@@ -1615,6 +1614,13 @@ const httpServer = http.createServer(async (req, res) => {
             const authSession = authenticatedSessions.get(bearerToken);
             console.log(`STREAMABLE HTTP 2025: SSE bearer token lookup result: ${authSession ? 'found' : 'not found'}`);
             if (authSession) {
+              // Validate that the linked admin session is still valid
+              const adminSession = adminSessions.get(authSession.adminSessionToken);
+              if (!adminSession || new Date(adminSession.expiresAt) <= new Date()) {
+                console.log(`STREAMABLE HTTP 2025: SSE linked admin session expired, invalidating bearer token`);
+                authenticatedSessions.delete(bearerToken);
+                return; // Exit early - invalid session
+              }
               // Bearer token is valid, use the most recent session ID from active sessions
               // Look for active sessions with this bearer token
               for (const [sessionKey, sessionData] of Object.entries(global.activeSessions || {})) {
