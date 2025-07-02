@@ -23,35 +23,58 @@ A Model Context Protocol (MCP) server for Home Assistant integration with Claude
 
 ## 🚀 Quick Start
 
-1. **Clone and Install**
-   ```bash
-   git clone https://github.com/shaike1/ha-mcp-bridge.git
-   cd ha-mcp-bridge
-   npm install
-   ```
+### Option 1: Docker (Recommended)
 
-2. **Configure Environment**
-   ```bash
-   cp docker-compose.example.yml docker-compose.yml
-   # Edit docker-compose.yml with your settings
-   ```
+```bash
+# Using pre-built images from GitHub Container Registry
+docker run -d \
+  --name ha-mcp-server \
+  -p 3000:3000 \
+  -e SERVER_URL=https://your-domain.com \
+  -e HA_URL=https://your-ha-instance.com \
+  -e HA_TOKEN=your_ha_token \
+  -e ADMIN_USERNAME=admin \
+  -e ADMIN_PASSWORD=your_secure_password \
+  shaikeme/ha-mcp-server:latest
+```
 
-3. **Set Required Environment Variables**
-   - `SERVER_URL` - Your public domain (e.g., https://ha-mcp.yourdomain.com)
-   - `HA_URL` - Your Home Assistant URL (e.g., https://homeassistant.local:8123)
-   - `HA_TOKEN` - Your Home Assistant Long-Lived Access Token
-   - `ADMIN_USERNAME` / `ADMIN_PASSWORD` - Admin credentials for MCP server
+### Option 2: Docker Compose
 
-4. **Run with Docker**
-   ```bash
-   docker-compose up -d
-   ```
+```bash
+# Clone repository
+git clone https://github.com/shaike1/ha-mcp-bridge.git
+cd ha-mcp-bridge
 
-5. **Connect to Claude.ai**
-   - Add MCP integration in Claude.ai
-   - Use your SERVER_URL
-   - Authenticate with admin credentials
-   - Provide HA URL and token when prompted
+# Use pre-built image
+docker-compose -f docker-compose.registry.yml up -d
+
+# Or build locally
+docker-compose up -d
+```
+
+### Option 3: Home Assistant Add-on (HAOS)
+
+1. Add this repository to your Home Assistant add-on store
+2. Install "Home Assistant MCP Server" add-on
+3. Configure with your public URL and admin password
+4. Start the add-on
+5. Connect to Claude.ai using the add-on URL
+
+### Option 4: Manual Installation
+
+```bash
+git clone https://github.com/shaike1/ha-mcp-bridge.git
+cd ha-mcp-bridge
+npm install
+npm start
+```
+
+### Connect to Claude.ai
+
+1. Add MCP integration in Claude.ai
+2. Use your SERVER_URL
+3. Authenticate with admin credentials
+4. Start controlling Home Assistant with Claude!
 
 ## 🔧 Configuration
 

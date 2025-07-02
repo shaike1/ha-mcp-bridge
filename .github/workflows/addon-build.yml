@@ -1,0 +1,42 @@
+name: Build HAOS Add-on
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  information:
+    name: Information
+    runs-on: ubuntu-latest
+    outputs:
+      architectures: ${{ steps.information.outputs.architectures }}
+      version: ${{ steps.information.outputs.version }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Get information
+      id: information
+      uses: home-assistant/actions/helpers/info@master
+      with:
+        path: "./haos-addon"
+
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    needs: information
+    strategy:
+      matrix:
+        arch: ${{ fromJson(needs.information.outputs.architectures) }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Build add-on
+      uses: home-assistant/builder@master
+      with:
+        args: |
+          --${{ matrix.arch }} \
+          --target haos-addon \
+          --docker-hub-check

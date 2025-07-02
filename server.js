@@ -48,59 +48,6 @@ function areCredentialsSet() {
 
 // --- END: New Setup Flow ---
 
-// Comprehensive session validation function
-function validateSession(bearerToken) {
-  if (!bearerToken) {
-    console.log('Session validation failed: No bearer token provided');
-    return { valid: false, reason: 'no_bearer_token' };
-  }
-  
-  const authSession = authenticatedSessions.get(bearerToken);
-  if (!authSession) {
-    console.log(`Session validation failed: Bearer token ${bearerToken.substring(0, 8)}... not found`);
-    return { valid: false, reason: 'bearer_token_not_found' };
-  }
-  
-  // Check if token is expired
-  if (authSession.tokenData && new Date(authSession.tokenData.expiresAt) <= new Date()) {
-    console.log(`Session validation failed: Bearer token ${bearerToken.substring(0, 8)}... expired`);
-    authenticatedSessions.delete(bearerToken);
-    return { valid: false, reason: 'bearer_token_expired' };
-  }
-  
-  // Check if linked admin session exists and is valid
-  const adminSessionToken = authSession.adminSessionToken;
-  if (!adminSessionToken) {
-    console.log(`Session validation failed: No linked admin session for bearer token ${bearerToken.substring(0, 8)}...`);
-    return { valid: false, reason: 'no_admin_session_link' };
-  }
-  
-  const adminSession = adminSessions.get(adminSessionToken);
-  if (!adminSession) {
-    console.log(`Session validation failed: Linked admin session ${adminSessionToken.substring(0, 8)}... not found`);
-    authenticatedSessions.delete(bearerToken);
-    return { valid: false, reason: 'admin_session_not_found' };
-  }
-  
-  if (new Date(adminSession.expiresAt) <= new Date()) {
-    console.log(`Session validation failed: Linked admin session ${adminSessionToken.substring(0, 8)}... expired`);
-    adminSessions.delete(adminSessionToken);
-    authenticatedSessions.delete(bearerToken);
-    return { valid: false, reason: 'admin_session_expired' };
-  }
-  
-  console.log(`Session validation passed: Bearer token ${bearerToken.substring(0, 8)}... is valid`);
-  return { 
-    valid: true, 
-    authSession: authSession, 
-    adminSession: adminSession,
-    haCredentials: {
-      host: adminSession.haHost,
-      token: adminSession.haToken
-    }
-  };
-}
-
 // Session persistence functions
 function saveSessionData() {
   const sessionData = {
@@ -1194,9 +1141,10 @@ const httpServer = http.createServer(async (req, res) => {
             
             console.log('HA connection test successful');
 
-            // Session-specific credentials are stored in adminSessions only
-            // Global credentials remain unchanged to maintain session isolation
-            console.log('HA credentials stored in session-specific storage only');
+            // **FIX: Persist the successful HA credentials globally**
+            HA_HOST = ha_host;
+            HA_API_TOKEN = ha_api_token;
+            console.log('Set global HA credentials from successful login');
             
             // Create admin session with HA connection details
             const sessionToken = createAdminSession(ha_host, ha_api_token);
@@ -1618,6 +1566,36 @@ const httpServer = http.createServer(async (req, res) => {
     }
   }
   
+  // N8N Token Generator Endpoint
+  if (parsedUrl.pathname === '/gentoken') {
+    if (req.method === 'GET') {
+      const html = '<!DOCTYPE html><html><head><title>N8N Token Generator</title><style>body{font-family:Arial;max-width:600px;margin:50px auto;padding:20px;background:#f5f5f5}.container{background:white;border-radius:10px;padding:40px;box-shadow:0 4px 6px rgba(0,0,0,0.1)}input,textarea{width:100%;padding:12px;margin:5px 0;border:1px solid #ddd;border-radius:5px;box-sizing:border-box}button{width:100%;padding:12px;background:#007cba;color:white;border:none;border-radius:5px;cursor:pointer}.result{margin-top:20px;padding:15px;background:#d4edda;border-radius:5px}</style></head><body><div class="container"><h1>🔧 N8N Token Generator</h1><p>Generate authentication for N8N MCP integration</p><form id="f"><p>Admin Username: <input id="u" value="admin" required></p><p>Admin Password: <input id="p" type="password" required></p><p>HA URL: <input id="h" placeholder="https://homeassistant.local:8123" required></p><p>HA Token: <textarea id="t" placeholder="eyJhbGci..." rows="3" required></textarea></p><button type="submit">Generate</button></form><div id="result"></div></div><script>document.getElementById("f").onsubmit=async(e)=>{e.preventDefault();try{const resp=await fetch("/gentoken",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({adminUser:document.getElementById("u").value,adminPass:document.getElementById("p").value,haUrl:document.getElementById("h").value,haToken:document.getElementById("t").value})});const data=await resp.json();document.getElementById("result").innerHTML=resp.ok?"<div class=\\"result\\"><h3>✅ Success!</h3><p><strong>Cookie:</strong> "+data.cookieHeader+"</p><p><strong>URL:</strong> "+data.mcpServerUrl+"/</p><p><strong>Tools:</strong> "+data.availableTools.length+"</p></div>":"<div style=\\"color:red\\">Error: "+data.error+"</div>"}catch(err){document.getElementById("result").innerHTML="<div style=\\"color:red\\">Error: "+err.message+"</div>"}};</script></body></html>';
+      res.writeHead(200, {'Content-Type': 'text/html'});
+      res.end(html);
+      return;
+    } else if (req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk.toString(); });
+      req.on('end', async () => {
+        try {
+          const {adminUser, adminPass, haUrl, haToken} = JSON.parse(body);
+          const fetch = (await import('node-fetch')).default;
+          const testResp = await fetch(haUrl + '/api/', {headers: {'Authorization': 'Bearer ' + haToken}});
+          if (!testResp.ok) throw new Error('HA connection failed');
+          const sessionToken = createAdminSession(haUrl, haToken);
+          const tools = await getTools();
+          const config = {mcpServerUrl: SERVER_URL, sessionToken: sessionToken, cookieHeader: 'admin_session=' + sessionToken, availableTools: tools};
+          res.writeHead(200, {'Content-Type': 'application/json'});
+          res.end(JSON.stringify(config));
+        } catch (error) {
+          res.writeHead(400, {'Content-Type': 'application/json'});
+          res.end(JSON.stringify({error: error.message}));
+        }
+      });
+      return;
+    }
+  }
+  
   // STREAMABLE HTTP MCP ENDPOINT (2025 spec compliance)
   // RFC: All client→server messages go through /message endpoint
   if (parsedUrl.pathname === '/' || parsedUrl.pathname === '/message') {
@@ -1662,15 +1640,11 @@ const httpServer = http.createServer(async (req, res) => {
           console.log(`STREAMABLE HTTP 2025: SSE checking bearer token auth: ${authHeader ? 'present' : 'missing'}`);
           if (authHeader && authHeader.startsWith('Bearer ')) {
             const bearerToken = authHeader.substring(7);
-            console.log(`STREAMABLE HTTP 2025: SSE validating bearer token: ${bearerToken.substring(0, 8)}...`);
-            
-            const validation = validateSession(bearerToken);
-            if (!validation.valid) {
-              console.log(`STREAMABLE HTTP 2025: SSE session validation failed: ${validation.reason}`);
-              return; // Exit early - invalid session
-            }
-            
-            const authSession = validation.authSession;
+            console.log(`STREAMABLE HTTP 2025: SSE looking up bearer token: ${bearerToken.substring(0, 8)}...`);
+            console.log(`STREAMABLE HTTP 2025: SSE authenticated sessions count: ${authenticatedSessions.size}`);
+            const authSession = authenticatedSessions.get(bearerToken);
+            console.log(`STREAMABLE HTTP 2025: SSE bearer token lookup result: ${authSession ? 'found' : 'not found'}`);
+            if (authSession) {
               // Bearer token is valid, use the most recent session ID from active sessions
               // Look for active sessions with this bearer token
               for (const [sessionKey, sessionData] of Object.entries(global.activeSessions || {})) {

@@ -1,0 +1,313 @@
+{
+  "name": "Home Assistant MCP Integration",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "f8b5c1d2-3e4a-5b6c-7d8e-9f0a1b2c3d4e",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "server": {
+          "serverUrl": "https://your-ha-mcp-domain.com",
+          "authentication": "bearer",
+          "bearerToken": "your-bearer-token-here"
+        },
+        "tool": "get_entities",
+        "arguments": {
+          "domain": "light"
+        }
+      },
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "Get HA Lights",
+      "type": "n8n-nodes-mcp.mcpClient",
+      "typeVersion": 1,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1d2e3f4-5678-90ab-cdef-123456789012",
+              "leftValue": "={{ $json.state }}",
+              "rightValue": "on",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b2c3d4e5-f678-90ab-cdef-234567890123",
+      "name": "Check Light State",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "server": {
+          "serverUrl": "https://your-ha-mcp-domain.com",
+          "authentication": "bearer",
+          "bearerToken": "your-bearer-token-here"
+        },
+        "tool": "control_lights",
+        "arguments": {
+          "entity_id": "={{ $json.entity_id }}",
+          "action": "turn_off"
+        }
+      },
+      "id": "c3d4e5f6-7890-abcd-ef12-34567890abcd",
+      "name": "Turn Off Light",
+      "type": "n8n-nodes-mcp.mcpClient",
+      "typeVersion": 1,
+      "position": [
+        900,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "server": {
+          "serverUrl": "https://your-ha-mcp-domain.com",
+          "authentication": "bearer",
+          "bearerToken": "your-bearer-token-here"
+        },
+        "tool": "get_sensors",
+        "arguments": {}
+      },
+      "id": "d4e5f678-90ab-cdef-1234-567890abcdef",
+      "name": "Get HA Sensors",
+      "type": "n8n-nodes-mcp.mcpClient",
+      "typeVersion": 1,
+      "position": [
+        900,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "e5f67890-abcd-ef12-3456-7890abcdef12",
+              "leftValue": "={{ $json.attributes?.device_class }}",
+              "rightValue": "temperature",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "f6789012-3456-7890-abcd-ef123456789a",
+              "leftValue": "={{ parseFloat($json.state) }}",
+              "rightValue": 25,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "e5f67890-abcd-ef12-3456-7890abcdef12",
+      "name": "Check Temperature",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "server": {
+          "serverUrl": "https://your-ha-mcp-domain.com",
+          "authentication": "bearer",
+          "bearerToken": "your-bearer-token-here"
+        },
+        "tool": "call_service",
+        "arguments": {
+          "domain": "climate",
+          "service": "set_temperature",
+          "entity_id": "climate.main_thermostat",
+          "temperature": 22
+        }
+      },
+      "id": "f6789012-3456-7890-abcd-ef123456789a",
+      "name": "Adjust Climate",
+      "type": "n8n-nodes-mcp.mcpClient",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "HA Automation Report",
+        "message": "=Lights turned off: {{ $('Turn Off Light').all().length }}\nTemperature sensors checked: {{ $('Get HA Sensors').all().length }}\nClimate adjustments made: {{ $('Adjust Climate').all().length }}",
+        "options": {}
+      },
+      "id": "78901234-5678-90ab-cdef-123456789abc",
+      "name": "Send Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        400
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get HA Lights",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get HA Lights": {
+      "main": [
+        [
+          {
+            "node": "Check Light State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Light State": {
+      "main": [
+        [
+          {
+            "node": "Turn Off Light",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get HA Sensors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Turn Off Light": {
+      "main": [
+        [
+          {
+            "node": "Send Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get HA Sensors": {
+      "main": [
+        [
+          {
+            "node": "Check Temperature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Temperature": {
+      "main": [
+        [
+          {
+            "node": "Adjust Climate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Adjust Climate": {
+      "main": [
+        [
+          {
+            "node": "Send Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z",
+      "id": "home-assistant",
+      "name": "home-assistant"
+    },
+    {
+      "createdAt": "2024-01-01T00:00:00.000Z", 
+      "updatedAt": "2024-01-01T00:00:00.000Z",
+      "id": "mcp",
+      "name": "mcp"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}

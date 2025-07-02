@@ -1,0 +1,45 @@
+version: '3.8'
+services:
+  ha-mcp-bridge:
+    networks:
+      - traefik
+    build: .
+    restart: unless-stopped
+    container_name: ha-mcp-bridge
+    working_dir: /app
+    command: /app/start.sh
+    volumes:
+      - ./:/app
+      - mcp_data:/app/data
+    environment:
+      - PORT=3001
+      - NODE_ENV=production
+      - SERVER_URL=https://your-domain.com
+      - MULTI_TENANT=true
+      - ENABLE_USER_REGISTRATION=true
+      - ADMIN_API_KEY=your_admin_api_key_here
+      - MCP_API_KEY=your_mcp_api_key_here
+      - LOG_LEVEL=debug
+      - DEBUG=true
+      - HA_URL=https://your-ha-instance.com
+      - HA_TOKEN=YOUR_HOME_ASSISTANT_TOKEN_HERE
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ha-mcp-bridge.rule=Host(`your-domain.com`)"
+      - "traefik.http.routers.ha-mcp-bridge.entrypoints=web,websecure"
+      - "traefik.http.routers.ha-mcp-bridge.tls=true"
+      - "traefik.http.routers.ha-mcp-bridge.tls.certresolver=mytlschallenge"
+      - "traefik.http.services.ha-mcp-bridge.loadbalancer.server.port=3001"
+
+volumes:
+  mcp_data:
+
+networks:
+  traefik:
+    external: true

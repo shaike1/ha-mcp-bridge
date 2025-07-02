@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  ha-mcp-server:
+    image: shaikeme/ha-mcp-server:latest
+    container_name: ha-mcp-server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - mcp_data:/app/data
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - SERVER_URL=${SERVER_URL:-http://localhost:3000}
+      - HA_URL=${HA_URL}
+      - HA_TOKEN=${HA_TOKEN}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  mcp_data:
+    driver: local
